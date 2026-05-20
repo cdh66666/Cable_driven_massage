@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <math.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 
 // PlatformIO 的 ESP32 Arduino core 使用 Serial 作为默认调试串口。
 #ifndef Serial0
@@ -21,6 +24,9 @@ void drawSquareTest();
 void drawFigureEightTest();
 void drawSpiralTest();
 void drawShapeTests();
+void setupWebPortal();
+void handleWebPortal();
+void handleWebPlayback();
 
 // ------------------- 硬件配置 -------------------
 #define UART2_TX 17
@@ -223,6 +229,7 @@ void show_help() {
     Serial0.println("coef  show saved/current coefficients");
     Serial0.println("circles  draw fine expanding circles around (75,75)");
     Serial0.println("square / eight / spiral / shapes  draw extra smooth test shapes");
+    Serial0.println("wifi  drawing portal: SSID MassageDraw, no password");
     Serial0.println("reboot  restart board and reload saved calibration");
     Serial0.println("==============================\n");
 }
@@ -293,9 +300,13 @@ float caliAngle[5][5] = {0};
 
 // 4个电机的真实换算系数 (°/mm)，校准后自动计算
 float realDeg2mm[5] = {0, -4.3, 4.3, -4.3, 4.3};
+const float defaultDeg2mm[5] = {0, -4.3, 4.3, -4.3, 4.3};
 const int8_t motorAngleSign[5] = {0, -1, 1, -1, 1};
 const char *calibrationNamespace = "motorcal";
 const uint32_t calibrationMagic = 0x43414C31; // "CAL1"
+const float calibrationCoeffMinAbs = 4.00f;
+const float calibrationCoeffMaxAbs = 4.70f;
+const float calibrationCoeffMaxSpread = 0.15f;
 
 // 理论系数（校准后会被实测值覆盖）
 const float deg2mm_theory = 3.14159f * 13.5f / 360.0f;
@@ -303,6 +314,37 @@ const float deg2mm_theory = 3.14159f * 13.5f / 360.0f;
 // 4个校准点坐标
 const float caliX[5] = {0, 0, 0, 150, 150};
 const float caliY[5] = {0, 0, 150, 150, 0};
+const int defaultCalibrationBaseCurrent = 80;
+const int defaultCalibrationPullCurrent = 900;
+int calibrationBaseCurrent = defaultCalibrationBaseCurrent;
+int calibrationPullCurrent = defaultCalibrationPullCurrent;
+const uint16_t calibrationPullMs = 3500;
+
+bool coefficientsAreValid(const float coeffs[5]) {
+    float minAbs = 1000.0f;
+    float maxAbs = 0.0f;
+
+    for (int m = 1; m <= 4; m++) {
+        float absCoeff = fabs(coeffs[m]);
+        if (absCoeff < calibrationCoeffMinAbs || absCoeff > calibrationCoeffMaxAbs) {
+            return false;
+        }
+        if ((coeffs[m] > 0 && motorAngleSign[m] < 0) ||
+            (coeffs[m] < 0 && motorAngleSign[m] > 0)) {
+            return false;
+        }
+        minAbs = min(minAbs, absCoeff);
+        maxAbs = max(maxAbs, absCoeff);
+    }
+
+    return (maxAbs - minAbs) <= calibrationCoeffMaxSpread;
+}
+
+void resetCalibrationToDefaults() {
+    for (int m = 1; m <= 4; m++) {
+        realDeg2mm[m] = defaultDeg2mm[m];
+    }
+}
 
 void printCoefficients() {
     Serial0.println("Current coefficients:");
@@ -339,6 +381,7 @@ void loadCalibration() {
     uint32_t magic = prefs.getUInt("magic", 0);
     if (magic != calibrationMagic) {
         prefs.end();
+        resetCalibrationToDefaults();
         Serial0.println("No saved calibration, using defaults.");
         printCoefficients();
         return;
@@ -351,6 +394,13 @@ void loadCalibration() {
     }
     prefs.end();
 
+    if (!coefficientsAreValid(realDeg2mm)) {
+        resetCalibrationToDefaults();
+        Serial0.println("Saved calibration is invalid, using defaults.");
+        printCoefficients();
+        return;
+    }
+
     Serial0.println("Loaded calibration from flash.");
     printCoefficients();
 }
@@ -361,14 +411,15 @@ void autoCalibrateHome() {
     Serial0.println("顺序：左下(0,0) → 左上(0,150) → 右上(150,150) → 右下(150,0)");
 
     allEnable(true);
+    delay(300);
 
     Serial0.println("\n步骤1：所有电机 100mA 预拉紧");
     for (int i = 0; i < motorTotal; i++) {
         int addr = allMotorList[i];
-        int cur = fixTorqueDir(addr, 100);
+        int cur = fixTorqueDir(addr, calibrationBaseCurrent);
         torque_motor(addr, cur);
     }
-    delay(1000);
+    delay(1200);
 
     for (int point = 1; point <= 4; point++) {
         Serial0.printf("\n===== 拉到第 %d 个点：(%.0f, %.0f) ====\n",
@@ -378,13 +429,17 @@ void autoCalibrateHome() {
 
         for (int i = 0; i < motorTotal; i++) {
             int addr = allMotorList[i];
-            int cur = fixTorqueDir(addr, 150);
+            int cur = fixTorqueDir(addr, calibrationBaseCurrent);
             torque_motor(addr, cur);
         }
 
-        int cur = fixTorqueDir(pullMotor, 800);
+        delay(200);
+
+        int cur = fixTorqueDir(pullMotor, calibrationPullCurrent);
         torque_motor(pullMotor, cur);
-        delay(1000);
+        Serial0.printf("Pull M%d to its corner: current=%dmA wait=%ums\n",
+                       pullMotor, calibrationPullCurrent, calibrationPullMs);
+        delay(calibrationPullMs);
 
         readAllMotorAngle();
         for (int m = 1; m <= 4; m++) {
@@ -400,7 +455,7 @@ void autoCalibrateHome() {
                        caliAngle[point][3],
                        caliAngle[point][4]);
 
-        cur = fixTorqueDir(pullMotor, 100);
+        cur = fixTorqueDir(pullMotor, calibrationBaseCurrent);
         torque_motor(pullMotor, cur);
         delay(500);
     }
@@ -420,6 +475,7 @@ void readAllMotorAngle() {
 
 void calcRealCoefficient() {
     Serial0.println("\n==== 计算每个电机真实角度/毫米系数 ====");
+    float newDeg2mm[5] = {0};
 
     for (int m = 1; m <= 4; m++) {
         float total_deg = 0;
@@ -433,6 +489,12 @@ void calcRealCoefficient() {
             float dy = caliY[p] - caliY[m];
             float mm = sqrt(dx * dx + dy * dy);
             float deg = caliAngle[p][m];
+            if (p < m) {
+                deg -= caliAngle[m][m];
+            }
+
+            Serial0.printf("Coeff sample M%d point%d: raw=%.1f zero=%.1f used=%.1f mm=%.1f\n",
+                           m, p, caliAngle[p][m], caliAngle[m][m], deg, mm);
 
             total_deg += fabs(deg);
             total_mm += mm;
@@ -444,7 +506,21 @@ void calcRealCoefficient() {
             coeffAbs = total_deg / total_mm;
         }
 
-        realDeg2mm[m] = coeffAbs * motorAngleSign[m];
+        newDeg2mm[m] = coeffAbs * motorAngleSign[m];
+    }
+
+    if (!coefficientsAreValid(newDeg2mm)) {
+        Serial0.println("Calibration result invalid, keeping previous coefficients and not saving.");
+        Serial0.printf("Expected abs range %.2f..%.2f deg/mm, max spread %.2f deg/mm\n",
+                       calibrationCoeffMinAbs, calibrationCoeffMaxAbs, calibrationCoeffMaxSpread);
+        Serial0.printf("Candidate: M1=%.3f M2=%.3f M3=%.3f M4=%.3f\n",
+                       newDeg2mm[1], newDeg2mm[2], newDeg2mm[3], newDeg2mm[4]);
+        printCoefficients();
+        return;
+    }
+
+    for (int m = 1; m <= 4; m++) {
+        realDeg2mm[m] = newDeg2mm[m];
     }
 
     for (int m = 1; m <= 4; m++) {
@@ -652,6 +728,850 @@ void drawShapeTests() {
     Serial0.println("Shape test suite done.");
 }
 
+// ====================== WiFi drawing portal ======================
+const char *apSsid = "MassageDraw";
+const byte dnsPort = 53;
+const IPAddress apIP(192, 168, 4, 1);
+const IPAddress apGateway(192, 168, 4, 1);
+const IPAddress apSubnet(255, 255, 255, 0);
+
+DNSServer dnsServer;
+WebServer webServer(80);
+
+struct WebPathPoint {
+    uint16_t x10;
+    uint16_t y10;
+    uint8_t draw;
+};
+
+const int maxWebPathPoints = 1600;
+const float webResampleMm = 1.5f;
+const float webTravelResampleMm = 1.5f;
+const uint16_t minWebStepDelayMs = 8;
+const uint16_t maxWebStepDelayMs = 80;
+
+WebPathPoint webPath[maxWebPathPoints];
+int webPathPointCount = 0;
+int webStrokeCount = 0;
+int webPlaybackIndex = 0;
+bool webPlaybackActive = false;
+bool webLoopPlayback = true;
+uint8_t webSpeedPercent = 50;
+uint8_t webTravelSpeedPercent = 15;
+uint32_t nextWebStepAt = 0;
+bool webTravelActive = false;
+float webTravelFromX = 0.0f;
+float webTravelFromY = 0.0f;
+float webTravelToX = 0.0f;
+float webTravelToY = 0.0f;
+int webTravelStep = 0;
+int webTravelSteps = 0;
+bool webCalibrationRequested = false;
+bool webCalibrationRunning = false;
+bool webCalibrationDone = false;
+
+const char indexHtml[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Massage Draw</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f2f3f5;color:#111;display:flex;align-items:flex-start;justify-content:center}
+main{width:min(92vw,560px);padding:calc(42px + env(safe-area-inset-top)) 0 28px}
+h1{text-align:center;font-size:32px;line-height:1.25;margin:0 0 22px;font-weight:750}
+#pad{display:block;width:100%;aspect-ratio:1/1;background:#fff;border:2px solid #111;touch-action:none}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.controls.extra{grid-template-columns:1fr 1fr;margin-top:12px}
+button{height:48px;border:0;border-radius:8px;font-size:18px;font-weight:650;color:#fff;background:#111}
+button.stop{background:#9b1c1c}
+button.clear{background:#4b5563}
+button.mode{background:#115e59}
+button.reset{background:#1d4ed8}
+button.calib{background:#7c2d12}
+.speed{margin-top:16px;display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;font-size:15px}
+input[type=range]{width:100%;accent-color:#111}
+#status{min-height:22px;margin-top:10px;font-size:14px;color:#333}
+#coef{min-height:42px;margin-top:6px;font-size:13px;line-height:1.45;color:#111;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<main>
+<h1>轨迹绘制</h1>
+<canvas id="pad"></canvas>
+<div class="controls">
+  <button id="start">开始</button>
+  <button id="stop" class="stop">停止</button>
+</div>
+<div class="controls extra">
+  <button id="clear" class="clear">清除画布</button>
+  <button id="mode" class="mode">循环: 开</button>
+  <button id="reset" class="reset">重置参数</button>
+  <button id="calibrate" class="calib">校准参数</button>
+</div>
+<div class="speed">
+  <span>绘制</span>
+  <input id="speed" type="range" min="1" max="100" value="50">
+  <span id="speedText">50</span>
+</div>
+<div class="speed">
+  <span>移动</span>
+  <input id="travelSpeed" type="range" min="1" max="100" value="15">
+  <span id="travelSpeedText">15</span>
+</div>
+<div class="speed">
+  <span>保持</span>
+  <input id="baseTorque" type="range" min="20" max="300" step="5" value="80">
+  <span id="baseTorqueText">80</span>
+</div>
+<div class="speed">
+  <span>校准</span>
+  <input id="pullTorque" type="range" min="300" max="1500" step="10" value="900">
+  <span id="pullTorqueText">900</span>
+</div>
+<div id="status"></div>
+<div id="coef"></div>
+</main>
+<script>
+const L0=150;
+const pad=document.getElementById('pad');
+const ctx=pad.getContext('2d');
+const statusEl=document.getElementById('status');
+const speed=document.getElementById('speed');
+const speedText=document.getElementById('speedText');
+const travelSpeed=document.getElementById('travelSpeed');
+const travelSpeedText=document.getElementById('travelSpeedText');
+const baseTorque=document.getElementById('baseTorque');
+const baseTorqueText=document.getElementById('baseTorqueText');
+const pullTorque=document.getElementById('pullTorque');
+const pullTorqueText=document.getElementById('pullTorqueText');
+const modeBtn=document.getElementById('mode');
+const coefEl=document.getElementById('coef');
+let drawing=false;
+let strokes=[];
+let activeStroke=null;
+let loopMode=true;
+let cssSize=0;
+
+function fitCanvas(){
+  const r=pad.getBoundingClientRect();
+  const dpr=Math.max(1,window.devicePixelRatio||1);
+  cssSize=r.width;
+  pad.width=Math.round(r.width*dpr);
+  pad.height=Math.round(r.width*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  redraw();
+}
+
+function redraw(){
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,cssSize,cssSize);
+  ctx.lineWidth=3;
+  ctx.lineCap='round';
+  ctx.lineJoin='round';
+  ctx.strokeStyle='#000';
+  for(const stroke of strokes){
+    if(stroke.length<2)continue;
+    ctx.beginPath();
+    for(let i=0;i<stroke.length;i++){
+      const p=stroke[i];
+      const x=p.x/L0*cssSize;
+      const y=(1-p.y/L0)*cssSize;
+      if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+}
+
+function toPoint(e){
+  const r=pad.getBoundingClientRect();
+  const x=Math.min(Math.max(e.clientX-r.left,0),r.width);
+  const y=Math.min(Math.max(e.clientY-r.top,0),r.height);
+  return {x:x/r.width*L0,y:(1-y/r.height)*L0,px:x,py:y};
+}
+
+function addPoint(p){
+  if(!activeStroke)return;
+  const last=activeStroke[activeStroke.length-1];
+  if(last){
+    const lx=last.x/L0*cssSize, ly=(1-last.y/L0)*cssSize;
+    if(Math.hypot(p.px-lx,p.py-ly)<2)return;
+  }
+  activeStroke.push({x:p.x,y:p.y});
+  redraw();
+}
+
+pad.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  pad.setPointerCapture(e.pointerId);
+  drawing=true;
+  activeStroke=[];
+  strokes.push(activeStroke);
+  addPoint(toPoint(e));
+  statusEl.textContent='正在绘制第 '+strokes.length+' 笔...';
+});
+pad.addEventListener('pointermove',e=>{if(drawing){e.preventDefault();addPoint(toPoint(e));}});
+function endDraw(){
+  if(!drawing)return;
+  drawing=false;
+  if(activeStroke && activeStroke.length<2){strokes.pop();}
+  activeStroke=null;
+  redraw();
+  statusEl.textContent='已记录 '+strokes.length+' 笔，'+pointCount()+' 个点';
+}
+pad.addEventListener('pointerup',endDraw);
+pad.addEventListener('pointercancel',endDraw);
+
+function pointCount(){
+  return strokes.reduce((sum,s)=>sum+s.length,0);
+}
+
+function pathBody(){
+  return strokes
+    .filter(s=>s.length>=2)
+    .map(s=>s.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(';'))
+    .join('\n');
+}
+
+async function post(url,body){
+  const opt={method:'POST'};
+  if(body!==undefined){opt.headers={'Content-Type':'text/plain'};opt.body=body;}
+  const res=await fetch(url,opt);
+  return await res.text();
+}
+
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+
+async function fetchStatus(timeout=2500){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeout);
+  try{
+    const res=await fetch('/status',{cache:'no-store',signal:controller.signal});
+    return await res.json();
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+function renderCoef(s){
+  if(!s || !Number.isFinite(s.m1))return;
+  coefEl.textContent=
+    `M1: ${s.m1.toFixed(3)} deg/mm  M2: ${s.m2.toFixed(3)} deg/mm\n`+
+    `M3: ${s.m3.toFixed(3)} deg/mm  M4: ${s.m4.toFixed(3)} deg/mm`;
+}
+
+async function sendMode(){
+  modeBtn.textContent=loopMode?'循环: 开':'循环: 关';
+  return await post('/mode?loop='+(loopMode?1:0));
+}
+
+function setModeButton(){
+  modeBtn.textContent=loopMode?'循环: 开':'循环: 关';
+}
+
+async function loadStatus(){
+  try{
+    const s=await fetchStatus();
+    if(Number.isFinite(s.speed)){
+      speed.value=s.speed;
+      speedText.textContent=s.speed;
+    }
+    if(Number.isFinite(s.travelSpeed)){
+      travelSpeed.value=s.travelSpeed;
+      travelSpeedText.textContent=s.travelSpeed;
+    }
+    if(Number.isFinite(s.baseTorque)){
+      baseTorque.value=s.baseTorque;
+      baseTorqueText.textContent=s.baseTorque;
+    }
+    if(Number.isFinite(s.pullTorque)){
+      pullTorque.value=s.pullTorque;
+      pullTorqueText.textContent=s.pullTorque;
+    }
+    loopMode=!!s.loop;
+    setModeButton();
+    renderCoef(s);
+    statusEl.textContent='已连接';
+  }catch(e){
+    statusEl.textContent='已打开画板';
+  }
+}
+
+document.getElementById('start').onclick=async()=>{
+  if(strokes.filter(s=>s.length>=2).length<1){statusEl.textContent='请先在白色框里画一条轨迹';return;}
+  statusEl.textContent='上传轨迹...';
+  await sendMode();
+  const saved=await post('/path',pathBody());
+  const started=await post('/start');
+  statusEl.textContent=`${saved} ${started}`;
+};
+
+document.getElementById('stop').onclick=async()=>{
+  statusEl.textContent=await post('/stop');
+};
+
+document.getElementById('clear').onclick=async()=>{
+  strokes=[];
+  activeStroke=null;
+  drawing=false;
+  redraw();
+  statusEl.textContent=await post('/clear');
+};
+
+modeBtn.onclick=async()=>{
+  loopMode=!loopMode;
+  statusEl.textContent=await sendMode();
+};
+
+document.getElementById('reset').onclick=async()=>{
+  statusEl.textContent=await post('/resetSettings');
+  await loadStatus();
+};
+
+async function pollCalibration(){
+  const end=Date.now()+140000;
+  while(Date.now()<end){
+    await sleep(1800);
+    try{
+      const s=await fetchStatus(1800);
+      renderCoef(s);
+      if(!s.calibrating){
+        statusEl.textContent=s.calibrated?'校准完成，参数已保存':'校准未完成';
+        return;
+      }
+    }catch(e){}
+  }
+  statusEl.textContent='校准仍在进行，请稍后刷新状态';
+}
+
+document.getElementById('calibrate').onclick=async()=>{
+  statusEl.textContent='校准中...';
+  coefEl.textContent='';
+  const msg=await post('/calibrate');
+  statusEl.textContent=msg;
+  pollCalibration();
+};
+
+let speedTimer=0;
+speed.oninput=()=>{
+  speedText.textContent=speed.value;
+  clearTimeout(speedTimer);
+  speedTimer=setTimeout(()=>post('/speed?value='+encodeURIComponent(speed.value)),250);
+};
+
+let travelSpeedTimer=0;
+travelSpeed.oninput=()=>{
+  travelSpeedText.textContent=travelSpeed.value;
+  clearTimeout(travelSpeedTimer);
+  travelSpeedTimer=setTimeout(()=>post('/travelSpeed?value='+encodeURIComponent(travelSpeed.value)),250);
+};
+
+let baseTorqueTimer=0;
+baseTorque.oninput=()=>{
+  baseTorqueText.textContent=baseTorque.value;
+  clearTimeout(baseTorqueTimer);
+  baseTorqueTimer=setTimeout(()=>post('/calibrationTorque?base='+encodeURIComponent(baseTorque.value)),250);
+};
+
+let pullTorqueTimer=0;
+pullTorque.oninput=()=>{
+  pullTorqueText.textContent=pullTorque.value;
+  clearTimeout(pullTorqueTimer);
+  pullTorqueTimer=setTimeout(()=>post('/calibrationTorque?pull='+encodeURIComponent(pullTorque.value)),250);
+};
+
+window.addEventListener('resize',fitCanvas);
+fitCanvas();
+loadStatus();
+setInterval(async()=>{
+  try{
+    const s=await fetchStatus(1200);
+    renderCoef(s);
+  }catch(e){}
+},3000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+uint16_t webStepDelayMs() {
+    int speed = constrain((int)webSpeedPercent, 1, 100);
+    return maxWebStepDelayMs - ((maxWebStepDelayMs - minWebStepDelayMs) * (speed - 1)) / 99;
+}
+
+uint16_t webTravelStepDelayMs() {
+    int speed = constrain((int)webTravelSpeedPercent, 1, 100);
+    return maxWebStepDelayMs - ((maxWebStepDelayMs - minWebStepDelayMs) * (speed - 1)) / 99;
+}
+
+void saveWebSettings() {
+    Preferences prefs;
+    if (!prefs.begin(calibrationNamespace, false)) {
+        Serial0.println("Web settings save failed: NVS open failed");
+        return;
+    }
+
+    prefs.putUInt("drawSpd", webSpeedPercent);
+    prefs.putUInt("travelSpd", webTravelSpeedPercent);
+    prefs.putUInt("calBase", calibrationBaseCurrent);
+    prefs.putUInt("calPull", calibrationPullCurrent);
+    prefs.end();
+    Serial0.printf("Web settings saved: draw=%u travel=%u calBase=%d calPull=%d\n",
+                   webSpeedPercent, webTravelSpeedPercent,
+                   calibrationBaseCurrent, calibrationPullCurrent);
+}
+
+void loadWebSettings() {
+    Preferences prefs;
+    if (!prefs.begin(calibrationNamespace, true)) {
+        Serial0.println("Web settings load skipped: NVS open failed");
+        return;
+    }
+
+    webSpeedPercent = (uint8_t)constrain((int)prefs.getUInt("drawSpd", webSpeedPercent), 1, 100);
+    webTravelSpeedPercent = (uint8_t)constrain((int)prefs.getUInt("travelSpd", webTravelSpeedPercent), 1, 100);
+    calibrationBaseCurrent = constrain((int)prefs.getUInt("calBase", calibrationBaseCurrent), 20, 300);
+    calibrationPullCurrent = constrain((int)prefs.getUInt("calPull", calibrationPullCurrent), 300, 1500);
+    prefs.end();
+
+    Serial0.printf("Loaded web settings: draw=%u travel=%u calBase=%d calPull=%d\n",
+                   webSpeedPercent, webTravelSpeedPercent,
+                   calibrationBaseCurrent, calibrationPullCurrent);
+}
+
+void stopWebPlayback(bool disableMotors) {
+    if (webPlaybackActive) {
+        Serial0.println("Web playback stopped.");
+    }
+    webPlaybackActive = false;
+    webTravelActive = false;
+    webPlaybackIndex = 0;
+    if (disableMotors) {
+        allEnable(false);
+    }
+}
+
+void appendWebPoint(float x, float y, bool draw) {
+    if (webPathPointCount >= maxWebPathPoints) {
+        return;
+    }
+
+    x = constrain(x, 0.0f, L0);
+    y = constrain(y, 0.0f, L0);
+    uint16_t x10 = (uint16_t)lroundf(x * 10.0f);
+    uint16_t y10 = (uint16_t)lroundf(y * 10.0f);
+
+    if (webPathPointCount > 0 &&
+        webPath[webPathPointCount - 1].x10 == x10 &&
+        webPath[webPathPointCount - 1].y10 == y10 &&
+        webPath[webPathPointCount - 1].draw == (draw ? 1 : 0)) {
+        return;
+    }
+
+    webPath[webPathPointCount].x10 = x10;
+    webPath[webPathPointCount].y10 = y10;
+    webPath[webPathPointCount].draw = draw ? 1 : 0;
+    webPathPointCount++;
+}
+
+void appendWebSegment(float fromX, float fromY, float toX, float toY, bool draw) {
+    float dx = toX - fromX;
+    float dy = toY - fromY;
+    float distance = sqrt(dx * dx + dy * dy);
+    int steps = max(1, (int)ceil(distance / webResampleMm));
+
+    for (int step = 1; step <= steps && webPathPointCount < maxWebPathPoints; step++) {
+        float t = (float)step / steps;
+        appendWebPoint(fromX + dx * t, fromY + dy * t, draw);
+    }
+}
+
+bool readNextPair(const String &body, int &idx, float &x, float &y) {
+    int len = body.length();
+    while (idx < len) {
+        char ch = body[idx];
+        if (ch == ';' || ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') idx++;
+        else break;
+    }
+    if (idx >= len) return false;
+
+    int comma = body.indexOf(',', idx);
+    if (comma < 0) return false;
+    int end = comma + 1;
+    while (end < len) {
+        char ch = body[end];
+        if (ch == ';' || ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') break;
+        end++;
+    }
+
+    x = body.substring(idx, comma).toFloat();
+    y = body.substring(comma + 1, end).toFloat();
+    idx = end;
+    return true;
+}
+
+bool loadWebStroke(const String &stroke, int &rawCount) {
+    int idx = 0;
+    int startPointCount = webPathPointCount;
+    float x = 0;
+    float y = 0;
+    float prevX = 0;
+    float prevY = 0;
+    bool hasPrev = false;
+    bool hasDrawSegment = false;
+
+    while (readNextPair(stroke, idx, x, y)) {
+        x = constrain(x, 0.0f, L0);
+        y = constrain(y, 0.0f, L0);
+
+        if (!hasPrev) {
+            appendWebPoint(x, y, false);
+            hasPrev = true;
+        } else {
+            appendWebSegment(prevX, prevY, x, y, true);
+            hasDrawSegment = true;
+        }
+
+        prevX = x;
+        prevY = y;
+        rawCount++;
+
+        if (webPathPointCount >= maxWebPathPoints) {
+            break;
+        }
+    }
+
+    if (hasDrawSegment) {
+        webStrokeCount++;
+    } else {
+        webPathPointCount = startPointCount;
+    }
+
+    return hasDrawSegment;
+}
+
+bool loadWebPath(const String &body) {
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+    int rawCount = 0;
+
+    int start = 0;
+    while (start <= body.length() && webPathPointCount < maxWebPathPoints) {
+        int end = body.indexOf('\n', start);
+        if (end < 0) end = body.length();
+
+        String stroke = body.substring(start, end);
+        stroke.trim();
+        if (stroke.length() > 0) {
+            loadWebStroke(stroke, rawCount);
+        }
+
+        if (end >= body.length()) break;
+        start = end + 1;
+    }
+
+    Serial0.printf("Web path loaded: strokes=%d raw=%d resampled=%d\n",
+                   webStrokeCount, rawCount, webPathPointCount);
+    return webStrokeCount > 0 && webPathPointCount >= 2;
+}
+
+void handleRootPage() {
+    webServer.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    webServer.sendHeader("Pragma", "no-cache");
+    webServer.sendHeader("Expires", "0");
+    webServer.send_P(200, "text/html; charset=utf-8", indexHtml);
+}
+
+void handlePathUpload() {
+    String body = webServer.arg("plain");
+    bool ok = loadWebPath(body);
+    if (ok) {
+        webServer.send(200, "text/plain; charset=utf-8",
+                       "轨迹已保存: " + String(webStrokeCount) + " 笔, " + String(webPathPointCount) + " 点");
+    } else {
+        webServer.send(400, "text/plain; charset=utf-8", "轨迹太短");
+    }
+}
+
+void handleStartPlayback() {
+    if (webPathPointCount < 2) {
+        webServer.send(400, "text/plain; charset=utf-8", "没有可播放轨迹");
+        return;
+    }
+
+    allEnable(true);
+    webPlaybackActive = true;
+    webTravelActive = false;
+    webPlaybackIndex = 0;
+    nextWebStepAt = 0;
+    Serial0.printf("Web playback started: strokes=%d points=%d drawSpeed=%u drawDelay=%u ms travelSpeed=%u travelDelay=%u ms loop=%d\n",
+                   webStrokeCount, webPathPointCount, webSpeedPercent, webStepDelayMs(),
+                   webTravelSpeedPercent, webTravelStepDelayMs(),
+                   webLoopPlayback ? 1 : 0);
+    webServer.send(200, "text/plain; charset=utf-8",
+                   webLoopPlayback ? "开始循环绘制" : "开始单次绘制");
+}
+
+void handleStopPlayback() {
+    stopWebPlayback(true);
+    webServer.send(200, "text/plain; charset=utf-8", "已停止");
+}
+
+void handleSpeedChange() {
+    if (webServer.hasArg("value")) {
+        uint8_t newSpeed = (uint8_t)constrain(webServer.arg("value").toInt(), 1, 100);
+        if (newSpeed != webSpeedPercent) {
+            webSpeedPercent = newSpeed;
+            saveWebSettings();
+        }
+    }
+    Serial0.printf("Web speed: %u delay=%u ms\n", webSpeedPercent, webStepDelayMs());
+    webServer.send(200, "text/plain; charset=utf-8", "绘制速度 " + String(webSpeedPercent));
+}
+
+void handleTravelSpeedChange() {
+    if (webServer.hasArg("value")) {
+        uint8_t newSpeed = (uint8_t)constrain(webServer.arg("value").toInt(), 1, 100);
+        if (newSpeed != webTravelSpeedPercent) {
+            webTravelSpeedPercent = newSpeed;
+            saveWebSettings();
+        }
+    }
+    Serial0.printf("Web travel speed: %u delay=%u ms\n", webTravelSpeedPercent, webTravelStepDelayMs());
+    webServer.send(200, "text/plain; charset=utf-8", "移动速度 " + String(webTravelSpeedPercent));
+}
+
+void handleCalibrationTorqueChange() {
+    bool changed = false;
+
+    if (webServer.hasArg("base")) {
+        int newBase = constrain(webServer.arg("base").toInt(), 20, 300);
+        if (newBase != calibrationBaseCurrent) {
+            calibrationBaseCurrent = newBase;
+            changed = true;
+        }
+    }
+
+    if (webServer.hasArg("pull")) {
+        int newPull = constrain(webServer.arg("pull").toInt(), 300, 1500);
+        if (newPull != calibrationPullCurrent) {
+            calibrationPullCurrent = newPull;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        saveWebSettings();
+    }
+
+    Serial0.printf("Calibration torque settings: base=%d pull=%d\n",
+                   calibrationBaseCurrent, calibrationPullCurrent);
+    webServer.send(200, "text/plain; charset=utf-8",
+                   "校准扭矩: 保持 " + String(calibrationBaseCurrent) +
+                   ", 当前 " + String(calibrationPullCurrent));
+}
+
+void handleSaveSettings() {
+    saveWebSettings();
+    webServer.send(200, "text/plain; charset=utf-8",
+                   "参数已保存: 绘制 " + String(webSpeedPercent) +
+                   ", 移动 " + String(webTravelSpeedPercent));
+}
+
+void handleResetSettings() {
+    stopWebPlayback(true);
+    resetCalibrationToDefaults();
+    webSpeedPercent = 50;
+    webTravelSpeedPercent = 15;
+    calibrationBaseCurrent = defaultCalibrationBaseCurrent;
+    calibrationPullCurrent = defaultCalibrationPullCurrent;
+    saveCalibration();
+    saveWebSettings();
+    Serial0.println("Web settings and calibration reset to defaults.");
+    webServer.send(200, "text/plain; charset=utf-8", "参数已重置");
+}
+
+void handleModeChange() {
+    if (webServer.hasArg("loop")) {
+        webLoopPlayback = webServer.arg("loop").toInt() != 0;
+    }
+    Serial0.printf("Web playback mode: %s\n", webLoopPlayback ? "loop" : "single");
+    webServer.send(200, "text/plain; charset=utf-8", webLoopPlayback ? "循环绘制" : "单次绘制");
+}
+
+void handleClearPath() {
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+    Serial0.println("Web canvas cleared.");
+    webServer.send(200, "text/plain; charset=utf-8", "画布已清除");
+}
+
+void handleCalibrateRequest() {
+    if (webCalibrationRunning || webCalibrationRequested) {
+        webServer.send(200, "text/plain; charset=utf-8", "校准已经在进行");
+        return;
+    }
+
+    stopWebPlayback(true);
+    webCalibrationRequested = true;
+    webCalibrationDone = false;
+    Serial0.println("Web calibration requested.");
+    webServer.send(200, "text/plain; charset=utf-8", "校准已开始，请等待完成");
+}
+
+void handleStatus() {
+    String json = "{\"points\":" + String(webPathPointCount) +
+                  ",\"strokes\":" + String(webStrokeCount) +
+                  ",\"playing\":" + String(webPlaybackActive ? "true" : "false") +
+                  ",\"loop\":" + String(webLoopPlayback ? "true" : "false") +
+                  ",\"speed\":" + String(webSpeedPercent) +
+                  ",\"travelSpeed\":" + String(webTravelSpeedPercent) +
+                  ",\"baseTorque\":" + String(calibrationBaseCurrent) +
+                  ",\"pullTorque\":" + String(calibrationPullCurrent) +
+                  ",\"calibrating\":" + String(webCalibrationRunning || webCalibrationRequested ? "true" : "false") +
+                  ",\"calibrated\":" + String(webCalibrationDone ? "true" : "false") +
+                  ",\"m1\":" + String(realDeg2mm[1], 3) +
+                  ",\"m2\":" + String(realDeg2mm[2], 3) +
+                  ",\"m3\":" + String(realDeg2mm[3], 3) +
+                  ",\"m4\":" + String(realDeg2mm[4], 3) + "}";
+    webServer.send(200, "application/json", json);
+}
+
+void setupWebPortal() {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAPConfig(apIP, apGateway, apSubnet);
+    WiFi.softAP(apSsid);
+    delay(100);
+
+    dnsServer.start(dnsPort, "*", apIP);
+
+    webServer.on("/", HTTP_GET, handleRootPage);
+    webServer.on("/path", HTTP_POST, handlePathUpload);
+    webServer.on("/start", HTTP_POST, handleStartPlayback);
+    webServer.on("/stop", HTTP_POST, handleStopPlayback);
+    webServer.on("/speed", HTTP_POST, handleSpeedChange);
+    webServer.on("/travelSpeed", HTTP_POST, handleTravelSpeedChange);
+    webServer.on("/calibrationTorque", HTTP_POST, handleCalibrationTorqueChange);
+    webServer.on("/saveSettings", HTTP_POST, handleSaveSettings);
+    webServer.on("/resetSettings", HTTP_POST, handleResetSettings);
+    webServer.on("/mode", HTTP_POST, handleModeChange);
+    webServer.on("/clear", HTTP_POST, handleClearPath);
+    webServer.on("/calibrate", HTTP_POST, handleCalibrateRequest);
+    webServer.on("/status", HTTP_GET, handleStatus);
+
+    webServer.on("/generate_204", HTTP_GET, handleRootPage);
+    webServer.on("/gen_204", HTTP_GET, handleRootPage);
+    webServer.on("/hotspot-detect.html", HTTP_GET, handleRootPage);
+    webServer.on("/ncsi.txt", HTTP_GET, handleRootPage);
+    webServer.on("/connecttest.txt", HTTP_GET, handleRootPage);
+    webServer.on("/canonical.html", HTTP_GET, handleRootPage);
+    webServer.on("/success.txt", HTTP_GET, handleRootPage);
+    webServer.on("/redirect", HTTP_GET, handleRootPage);
+    webServer.onNotFound(handleRootPage);
+    webServer.begin();
+
+    Serial0.println("Open WiFi drawing portal ready.");
+    Serial0.printf("SSID: %s  Password: none  URL: http://%s/\n",
+                   apSsid, apIP.toString().c_str());
+}
+
+void handleWebPortal() {
+    dnsServer.processNextRequest();
+    webServer.handleClient();
+}
+
+void handleWebCalibration() {
+    if (!webCalibrationRequested || webCalibrationRunning) {
+        return;
+    }
+
+    webCalibrationRequested = false;
+    webCalibrationRunning = true;
+    webCalibrationDone = false;
+    Serial0.println("Web calibration started.");
+    allEnable(true);
+    delay(500);
+    autoCalibrateHome();
+    webCalibrationRunning = false;
+    webCalibrationDone = true;
+    Serial0.println("Web calibration finished and saved.");
+}
+
+void finishWebPlaybackCycle() {
+    if (webLoopPlayback) {
+        webPlaybackIndex = 0;
+        webTravelActive = false;
+        return;
+    }
+
+    Serial0.println("Web single playback complete.");
+    stopWebPlayback(true);
+}
+
+void handleWebPlayback() {
+    if (!webPlaybackActive || webPathPointCount < 2) {
+        return;
+    }
+
+    uint32_t now = millis();
+    if ((int32_t)(now - nextWebStepAt) < 0) {
+        return;
+    }
+
+    if (webTravelActive) {
+        webTravelStep++;
+        float t = (float)webTravelStep / webTravelSteps;
+        float x = webTravelFromX + (webTravelToX - webTravelFromX) * t;
+        float y = webTravelFromY + (webTravelToY - webTravelFromY) * t;
+        moveToXY(x, y, false, false);
+
+        if (webTravelStep >= webTravelSteps) {
+            webTravelActive = false;
+            webPlaybackIndex++;
+        }
+
+        nextWebStepAt = millis() + webTravelStepDelayMs();
+        return;
+    }
+
+    if (webPlaybackIndex >= webPathPointCount) {
+        finishWebPlaybackCycle();
+        return;
+    }
+
+    WebPathPoint &point = webPath[webPlaybackIndex];
+    float x = point.x10 * 0.1f;
+    float y = point.y10 * 0.1f;
+
+    if (!point.draw) {
+        float fromX = currentXYValid ? currentX : (L0 * 0.5f);
+        float fromY = currentXYValid ? currentY : (L0 * 0.5f);
+        float dx = x - fromX;
+        float dy = y - fromY;
+        float distance = sqrt(dx * dx + dy * dy);
+
+        webTravelFromX = fromX;
+        webTravelFromY = fromY;
+        webTravelToX = x;
+        webTravelToY = y;
+        webTravelSteps = max(1, (int)ceil(distance / webTravelResampleMm));
+        webTravelStep = 0;
+        webTravelActive = true;
+        nextWebStepAt = 0;
+        Serial0.printf("Web travel to (%.1f,%.1f): steps=%d speed=%u delay=%u ms\n",
+                       x, y, webTravelSteps, webTravelSpeedPercent, webTravelStepDelayMs());
+        return;
+    }
+
+    moveToXY(x, y, false, false);
+    webPlaybackIndex++;
+    nextWebStepAt = millis() + webStepDelayMs();
+}
+
 // 调试指令扩展
 bool parseNewCommand(String s) {
     s.trim();
@@ -719,12 +1639,18 @@ void setup() {
     Serial0.println("===== 全功能电机调试器 =====");
     Serial0.println("默认模式：单电机独立测试，输入M切换全体同步");
     loadCalibration();
+    loadWebSettings();
+    setupWebPortal();
     show_help();
 }
 
 // ------------------- 主循环 -------------------
 void loop() {
     static String serialLine;
+
+    handleWebPortal();
+    handleWebCalibration();
+    handleWebPlayback();
 
     while (Serial0.available()) {
         char ch = (char)Serial0.read();
