@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include "rice_preset.h"
 
 // PlatformIO 的 ESP32 Arduino core 使用 Serial 作为默认调试串口。
 #ifndef Serial0
@@ -229,6 +230,7 @@ void show_help() {
     Serial0.println("coef  show saved/current coefficients");
     Serial0.println("circles  draw fine expanding circles around (75,75)");
     Serial0.println("square / eight / spiral / shapes  draw extra smooth test shapes");
+    Serial0.println("ricepreset  load built-in 10000-point rice preset without moving");
     Serial0.println("wifi  drawing portal: SSID MassageDraw, no password");
     Serial0.println("reboot  restart board and reload saved calibration");
     Serial0.println("==============================\n");
@@ -744,8 +746,8 @@ struct WebPathPoint {
     uint8_t draw;
 };
 
-const int maxWebPathPoints = 1600;
-const float webResampleMm = 1.5f;
+const int maxWebPathPoints = 12000;
+const float webResampleMm = 0.15f;
 const float webTravelResampleMm = 1.5f;
 const uint16_t minWebStepDelayMs = 8;
 const uint16_t maxWebStepDelayMs = 80;
@@ -785,14 +787,16 @@ h1{text-align:center;font-size:32px;line-height:1.25;margin:0 0 22px;font-weight
 #pad{display:block;width:100%;aspect-ratio:1/1;background:#fff;border:2px solid #111;touch-action:none}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .controls.extra{grid-template-columns:1fr 1fr;margin-top:12px}
-button{height:48px;border:0;border-radius:8px;font-size:18px;font-weight:650;color:#fff;background:#111}
+button,.upload{height:48px;border:0;border-radius:8px;font-size:18px;font-weight:650;color:#fff;background:#111;display:flex;align-items:center;justify-content:center;text-align:center}
 button.stop{background:#9b1c1c}
 button.clear{background:#4b5563}
 button.mode{background:#115e59}
 button.reset{background:#1d4ed8}
 button.calib{background:#7c2d12}
+button.image{background:#374151}
 .speed{margin-top:16px;display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;font-size:15px}
 input[type=range]{width:100%;accent-color:#111}
+input[type=file]{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
 #status{min-height:22px;margin-top:10px;font-size:14px;color:#333}
 #coef{min-height:42px;margin-top:6px;font-size:13px;line-height:1.45;color:#111;white-space:pre-wrap}
 </style>
@@ -810,7 +814,9 @@ input[type=range]{width:100%;accent-color:#111}
   <button id="mode" class="mode">循环: 开</button>
   <button id="reset" class="reset">重置参数</button>
   <button id="calibrate" class="calib">校准参数</button>
+  <button id="riceBtn" class="image">询问笔仙</button>
 </div>
+<input id="imageInput" type="file" accept="image/*">
 <div class="speed">
   <span>绘制</span>
   <input id="speed" type="range" min="1" max="100" value="50">
@@ -853,6 +859,8 @@ let drawing=false;
 let strokes=[];
 let activeStroke=null;
 let loopMode=true;
+let ricePresetSelected=false;
+const ricePresetPointCount=10000;
 let cssSize=0;
 
 function fitCanvas(){
@@ -906,6 +914,7 @@ function addPoint(p){
 pad.addEventListener('pointerdown',e=>{
   e.preventDefault();
   pad.setPointerCapture(e.pointerId);
+  ricePresetSelected=false;
   drawing=true;
   activeStroke=[];
   strokes.push(activeStroke);
@@ -1000,10 +1009,10 @@ async function loadStatus(){
 }
 
 document.getElementById('start').onclick=async()=>{
-  if(strokes.filter(s=>s.length>=2).length<1){statusEl.textContent='请先在白色框里画一条轨迹';return;}
+  if(!ricePresetSelected && strokes.filter(s=>s.length>=2).length<1){statusEl.textContent='请先在白色框里画一条轨迹';return;}
   statusEl.textContent='上传轨迹...';
   await sendMode();
-  const saved=await post('/path',pathBody());
+  const saved=ricePresetSelected ? await post('/ricePreset') : await post('/path',pathBody());
   const started=await post('/start');
   statusEl.textContent=`${saved} ${started}`;
 };
@@ -1016,6 +1025,7 @@ document.getElementById('clear').onclick=async()=>{
   strokes=[];
   activeStroke=null;
   drawing=false;
+  ricePresetSelected=false;
   redraw();
   statusEl.textContent=await post('/clear');
 };
@@ -1053,6 +1063,325 @@ document.getElementById('calibrate').onclick=async()=>{
   statusEl.textContent=msg;
   pollCalibration();
 };
+
+function addLinePoints(out,a,b,steps){
+  for(let i=1;i<=steps;i++){
+    const t=i/steps;
+    out.push({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+  }
+}
+
+function addBezierPoints(out,p0,p1,p2,p3,steps){
+  for(let i=1;i<=steps;i++){
+    const t=i/steps;
+    const u=1-t;
+    out.push({
+      x:u*u*u*p0.x+3*u*u*t*p1.x+3*u*t*t*p2.x+t*t*t*p3.x,
+      y:u*u*u*p0.y+3*u*u*t*p1.y+3*u*t*t*p2.y+t*t*t*p3.y
+    });
+  }
+}
+
+function addLeafLoop(out,base,tip,width,steps){
+  const last=out[out.length-1]||base;
+  addLinePoints(out,last,base,4);
+  const dx=tip.x-base.x;
+  const dy=tip.y-base.y;
+  const d=Math.hypot(dx,dy)||1;
+  const nx=-dy/d;
+  const ny=dx/d;
+  const mid={x:(base.x+tip.x)*0.5,y:(base.y+tip.y)*0.5};
+  const sideA={x:mid.x+nx*width,y:mid.y+ny*width};
+  const sideB={x:mid.x-nx*width,y:mid.y-ny*width};
+  addBezierPoints(out,base,sideA,sideA,tip,steps);
+  addBezierPoints(out,tip,sideB,sideB,base,steps);
+}
+
+function addDropLoop(out,top,bottom,width){
+  const last=out[out.length-1]||top;
+  addLinePoints(out,last,top,5);
+  const left={x:(top.x+bottom.x)*0.5-width,y:(top.y+bottom.y)*0.5};
+  const right={x:(top.x+bottom.x)*0.5+width,y:(top.y+bottom.y)*0.5};
+  addBezierPoints(out,top,left,{x:bottom.x-width*0.7,y:bottom.y+2},bottom,10);
+  addBezierPoints(out,bottom,{x:bottom.x+width*0.7,y:bottom.y+2},right,top,10);
+}
+
+function addStem(out,points){
+  let last=out[out.length-1]||points[0];
+  addLinePoints(out,last,points[0],4);
+  for(let i=1;i<points.length;i++){
+    addLinePoints(out,points[i-1],points[i],5);
+  }
+}
+
+function addCurve(out,p0,p1,p2,p3,steps){
+  const last=out[out.length-1]||p0;
+  addLinePoints(out,last,p0,4);
+  addBezierPoints(out,p0,p1,p2,p3,steps);
+}
+
+function curveStroke(p0,p1,p2,p3,steps){
+  const out=[p0];
+  addBezierPoints(out,p0,p1,p2,p3,steps);
+  return out;
+}
+
+function leafStroke(base,tip,width,steps){
+  const out=[base];
+  const dx=tip.x-base.x;
+  const dy=tip.y-base.y;
+  const d=Math.hypot(dx,dy)||1;
+  const nx=-dy/d;
+  const ny=dx/d;
+  const mid={x:(base.x+tip.x)*0.5,y:(base.y+tip.y)*0.5};
+  const sideA={x:mid.x+nx*width,y:mid.y+ny*width};
+  const sideB={x:mid.x-nx*width,y:mid.y-ny*width};
+  addBezierPoints(out,base,sideA,sideA,tip,steps);
+  addBezierPoints(out,tip,sideB,sideB,base,steps);
+  return out;
+}
+
+function dropStroke(top,bottom,width,steps){
+  const out=[top];
+  const left={x:(top.x+bottom.x)*0.5-width,y:(top.y+bottom.y)*0.5};
+  const right={x:(top.x+bottom.x)*0.5+width,y:(top.y+bottom.y)*0.5};
+  addBezierPoints(out,top,left,{x:bottom.x-width*0.7,y:bottom.y+2},bottom,steps);
+  addBezierPoints(out,bottom,{x:bottom.x+width*0.7,y:bottom.y+2},right,top,steps);
+  return out;
+}
+
+function jitterStroke(stroke,amp){
+  return stroke.map((p,i)=>{
+    if(i===0||i===stroke.length-1)return p;
+    const n=Math.sin(i*12.9898+p.x*0.37+p.y*0.71)*43758.5453;
+    const f=n-Math.floor(n);
+    const a=(f-0.5)*amp;
+    return {x:Math.min(Math.max(p.x+a,0),L0),y:Math.min(Math.max(p.y-a*0.45,0),L0)};
+  });
+}
+
+function densifyStroke(stroke,target){
+  if(stroke.length<2)return stroke.slice();
+  target=Math.max(2,target);
+  const lengths=[];
+  let total=0;
+  for(let i=1;i<stroke.length;i++){
+    const a=stroke[i-1], b=stroke[i];
+    total+=Math.hypot(b.x-a.x,b.y-a.y);
+    lengths.push(total);
+  }
+  const out=[stroke[0]];
+  for(let i=1;i<target;i++){
+    const dist=total*i/(target-1);
+    let seg=0;
+    while(seg<lengths.length-1&&lengths[seg]<dist)seg++;
+    const prevLen=seg===0?0:lengths[seg-1];
+    const span=Math.max(0.0001,lengths[seg]-prevLen);
+    const t=(dist-prevLen)/span;
+    const a=stroke[seg], b=stroke[seg+1];
+    out.push({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+  }
+  return out;
+}
+
+function balanceStrokePoints(strokes,target){
+  const lens=strokes.map(s=>{
+    let len=0;
+    for(let i=1;i<s.length;i++)len+=Math.hypot(s[i].x-s[i-1].x,s[i].y-s[i-1].y);
+    return Math.max(0.1,len);
+  });
+  const totalLen=lens.reduce((a,b)=>a+b,0);
+  let used=0;
+  const counts=lens.map((len,i)=>{
+    const count=Math.max(2,Math.round(target*len/totalLen));
+    used+=count;
+    return count;
+  });
+  while(used!==target){
+    let best=0;
+    for(let i=1;i<counts.length;i++)if(lens[i]>lens[best])best=i;
+    if(used<target){counts[best]++;used++;}
+    else if(counts[best]>2){counts[best]--;used--;}
+    else break;
+  }
+  return strokes.map((s,i)=>densifyStroke(s,counts[i]));
+}
+
+function riceEarStrokes(){
+  return [[{"x":133.68,"y":122.82},{"x":132.76,"y":122.05},{"x":133.5,"y":120.81},{"x":133.49,"y":122.8},{"x":131.39,"y":123.62},{"x":128.75,"y":123.87},{"x":126.09,"y":124.06},{"x":123.42,"y":124.19},{"x":120.75,"y":124.32},{"x":118.08,"y":124.25},{"x":115.44,"y":123.88},{"x":112.96,"y":122.96},{"x":110.38,"y":122.36},{"x":108.88,"y":121.03},{"x":111.43,"y":121.34},{"x":114.06,"y":121.79},{"x":116.72,"y":121.98},{"x":119.39,"y":121.85},{"x":122.05,"y":121.66},{"x":124.7,"y":121.33},{"x":127.34,"y":120.96},{"x":129.97,"y":120.52},{"x":131.91,"y":121.77},{"x":130.69,"y":123.98},{"x":128.91,"y":125.98},{"x":127.12,"y":127.99},{"x":125.34,"y":129.99},{"x":123.55,"y":131.99},{"x":123.65,"y":133.93},{"x":123.34,"y":135.0},{"x":120.85,"y":134.7},{"x":118.8,"y":133.0},{"x":116.65,"y":131.43},{"x":114.4,"y":129.98},{"x":112.1,"y":128.62},{"x":112.98,"y":127.68},{"x":115.09,"y":127.32},{"x":117.32,"y":128.79},{"x":119.45,"y":130.41},{"x":121.54,"y":132.07},{"x":121.59,"y":132.26},{"x":119.38,"y":130.74},{"x":117.17,"y":129.23},{"x":114.96,"y":127.71},{"x":112.8,"y":126.62},{"x":110.34,"y":127.04},{"x":107.86,"y":126.25},{"x":109.19,"y":126.04},{"x":111.75,"y":126.48},{"x":111.86,"y":124.28},{"x":109.3,"y":123.86},{"x":109.29,"y":123.18},{"x":111.87,"y":123.74},{"x":113.23,"y":125.88},{"x":111.06,"y":125.69},{"x":110.02,"y":124.57},{"x":110.65,"y":125.2},{"x":108.13,"y":124.28},{"x":106.34,"y":125.69},{"x":103.84,"y":125.23},{"x":101.26,"y":124.66},{"x":98.8,"y":123.78},{"x":99.81,"y":121.77},{"x":98.39,"y":119.53},{"x":98.37,"y":117.93},{"x":101.0,"y":118.31},{"x":103.6,"y":118.92},{"x":106.2,"y":119.51},{"x":108.05,"y":121.18},{"x":107.57,"y":123.78},{"x":105.09,"y":123.52},{"x":102.47,"y":122.96},{"x":99.85,"y":122.39},{"x":97.5,"y":122.07},{"x":95.33,"y":120.53},{"x":93.56,"y":118.83},{"x":91.82,"y":116.89},{"x":90.11,"y":114.84},{"x":88.85,"y":112.52},{"x":89.22,"y":110.47},{"x":91.63,"y":111.26},{"x":93.31,"y":113.34},{"x":94.88,"y":115.5},{"x":96.25,"y":117.79},{"x":97.47,"y":120.17},{"x":98.62,"y":122.16},{"x":95.95,"y":121.9},{"x":93.33,"y":121.47},{"x":90.75,"y":120.8},{"x":88.84,"y":119.59},{"x":91.34,"y":120.0},{"x":93.83,"y":120.86},{"x":93.76,"y":120.75},{"x":91.7,"y":119.16},{"x":89.16,"y":118.35},{"x":90.44,"y":117.63},{"x":91.95,"y":119.21},{"x":89.3,"y":118.78},{"x":87.76,"y":119.98},{"x":86.08,"y":121.66},{"x":83.48,"y":121.36},{"x":83.83,"y":118.82},{"x":83.95,"y":116.15},{"x":83.89,"y":113.48},{"x":83.77,"y":110.81},{"x":83.69,"y":108.13},{"x":83.76,"y":105.46},{"x":83.95,"y":102.8},{"x":84.92,"y":103.59},{"x":85.77,"y":106.12},{"x":86.68,"y":108.63},{"x":87.48,"y":111.17},{"x":88.01,"y":113.78},{"x":88.12,"y":116.44},{"x":87.46,"y":118.53},{"x":84.79,"y":118.36},{"x":82.43,"y":118.75},{"x":79.78,"y":118.7},{"x":78.74,"y":117.98},{"x":81.36,"y":117.64},{"x":82.84,"y":117.23},{"x":80.36,"y":116.74},{"x":77.76,"y":117.34},{"x":75.14,"y":117.68},{"x":72.54,"y":117.15},{"x":69.96,"y":116.56},{"x":69.46,"y":115.18},{"x":72.01,"y":114.4},{"x":74.65,"y":114.43},{"x":77.25,"y":115.03},{"x":79.81,"y":115.82},{"x":82.11,"y":116.08},{"x":80.0,"y":114.81},{"x":78.26,"y":113.56},{"x":75.95,"y":112.26},{"x":74.05,"y":110.55},{"x":72.63,"y":108.3},{"x":71.25,"y":106.04},{"x":71.53,"y":105.16},{"x":73.95,"y":106.3},{"x":76.21,"y":107.73},{"x":78.35,"y":109.31},{"x":79.91,"y":111.48},{"x":80.98,"y":113.92},{"x":82.78,"y":115.7},{"x":82.76,"y":115.88},{"x":82.16,"y":113.55},{"x":82.92,"y":113.39},{"x":80.39,"y":113.65},{"x":77.71,"y":113.6},{"x":75.1,"y":113.39},{"x":73.26,"y":111.98},{"x":70.86,"y":110.8},{"x":68.38,"y":109.79},{"x":66.07,"y":108.44},{"x":64.24,"y":106.56},{"x":62.9,"y":104.27},{"x":62.1,"y":101.9},{"x":64.39,"y":103.26},{"x":66.71,"y":104.6},{"x":68.85,"y":106.18},{"x":70.59,"y":108.21},{"x":71.99,"y":110.49},{"x":74.0,"y":112.23},{"x":76.16,"y":113.54},{"x":73.56,"y":112.88},{"x":70.92,"y":112.56},{"x":68.29,"y":113.04},{"x":66.01,"y":113.95},{"x":63.73,"y":113.12},{"x":61.5,"y":112.02},{"x":59.39,"y":110.97},{"x":57.11,"y":110.0},{"x":59.59,"y":109.72},{"x":62.27,"y":109.77},{"x":64.92,"y":110.06},{"x":67.52,"y":110.66},{"x":70.05,"y":111.53},{"x":72.22,"y":112.67},{"x":70.06,"y":113.88},{"x":69.93,"y":113.45},{"x":70.95,"y":112.84},{"x":68.72,"y":111.36},{"x":66.49,"y":109.87},{"x":64.07,"y":108.93},{"x":61.4,"y":108.91},{"x":58.74,"y":108.75},{"x":56.24,"y":107.92},{"x":53.92,"y":106.63},{"x":51.58,"y":105.37},{"x":50.79,"y":104.53},{"x":53.46,"y":104.34},{"x":56.12,"y":104.35},{"x":58.7,"y":105.05},{"x":60.95,"y":106.49},{"x":63.13,"y":108.04},{"x":65.28,"y":109.05},{"x":63.48,"y":107.06},{"x":61.35,"y":105.52},{"x":59.6,"y":103.57},{"x":58.0,"y":101.43},{"x":56.81,"y":99.04},{"x":55.52,"y":96.76},{"x":57.84,"y":98.04},{"x":59.94,"y":99.68},{"x":61.12,"y":101.55},{"x":61.85,"y":104.09},{"x":63.02,"y":106.49},{"x":60.94,"y":105.2},{"x":58.7,"y":103.72},{"x":56.42,"y":102.38},{"x":54.2,"y":100.89},{"x":52.06,"y":99.29},{"x":50.38,"y":97.33},{"x":49.12,"y":95.15},{"x":47.72,"y":93.06},{"x":46.92,"y":90.79},{"x":49.12,"y":92.3},{"x":51.34,"y":93.79},{"x":53.34,"y":95.55},{"x":54.86,"y":97.75},{"x":55.95,"y":100.18},{"x":57.04,"y":102.62},{"x":54.61,"y":103.26},{"x":51.94,"y":103.32},{"x":49.32,"y":103.19},{"x":47.28,"y":101.75},{"x":45.07,"y":100.26},{"x":44.07,"y":98.83},{"x":46.73,"y":98.92},{"x":49.34,"y":99.51},{"x":51.8,"y":100.49},{"x":54.02,"y":101.99},{"x":55.38,"y":102.94},{"x":53.18,"y":101.41},{"x":50.99,"y":99.87},{"x":48.79,"y":98.34},{"x":46.64,"y":96.82},{"x":44.6,"y":95.09},{"x":42.59,"y":93.33},{"x":40.77,"y":91.37},{"x":39.09,"y":89.28},{"x":37.39,"y":87.22},{"x":35.66,"y":85.18},{"x":33.71,"y":83.4},{"x":31.5,"y":82.02},{"x":28.94,"y":81.32},{"x":26.89,"y":79.7},{"x":25.27,"y":77.6},{"x":24.06,"y":75.24},{"x":25.6,"y":75.27},{"x":28.01,"y":76.44},{"x":30.15,"y":78.04},{"x":31.85,"y":80.09},{"x":33.32,"y":82.32},{"x":35.18,"y":83.28},{"x":36.67,"y":85.48},{"x":38.29,"y":87.61},{"x":39.93,"y":89.72},{"x":41.64,"y":91.77},{"x":43.51,"y":93.68},{"x":45.49,"y":95.47},{"x":47.52,"y":97.22},{"x":47.3,"y":98.02},{"x":44.66,"y":97.95},{"x":42.22,"y":98.15},{"x":40.25,"y":96.55},{"x":38.25,"y":94.89},{"x":36.16,"y":93.22},{"x":33.98,"y":91.69},{"x":31.82,"y":90.13},{"x":29.61,"y":88.63},{"x":27.38,"y":87.16},{"x":25.04,"y":85.94},{"x":22.91,"y":84.52},{"x":20.41,"y":83.6},{"x":21.01,"y":83.33},{"x":23.61,"y":83.9},{"x":26.13,"y":84.77},{"x":28.55,"y":85.88},{"x":30.94,"y":87.07},{"x":33.23,"y":88.43},{"x":35.44,"y":89.95},{"x":37.62,"y":91.49},{"x":39.77,"y":93.09},{"x":41.88,"y":94.71},{"x":43.91,"y":96.41},{"x":46.17,"y":97.68},{"x":46.97,"y":95.51},{"x":47.61,"y":92.9},{"x":48.11,"y":90.32},{"x":46.35,"y":88.35},{"x":44.81,"y":86.18},{"x":43.37,"y":83.93},{"x":41.96,"y":81.67},{"x":40.64,"y":79.39},{"x":39.36,"y":77.04},{"x":38.15,"y":74.66},{"x":36.97,"y":72.26},{"x":35.97,"y":69.79},{"x":35.06,"y":67.28},{"x":34.18,"y":64.77},{"x":33.31,"y":62.24},{"x":34.0,"y":62.79},{"x":35.19,"y":64.89},{"x":36.02,"y":67.43},{"x":36.87,"y":69.96},{"x":37.84,"y":72.46},{"x":38.9,"y":74.91},{"x":40.1,"y":77.31},{"x":41.38,"y":79.66},{"x":42.76,"y":81.94},{"x":44.17,"y":84.22},{"x":45.64,"y":86.46},{"x":47.14,"y":88.66},{"x":48.7,"y":90.06},{"x":50.81,"y":88.4},{"x":52.92,"y":86.75},{"x":53.77,"y":84.88},{"x":53.4,"y":82.71},{"x":52.4,"y":80.22},{"x":51.48,"y":77.71},{"x":50.42,"y":75.26},{"x":49.66,"y":72.71},{"x":49.25,"y":70.36},{"x":48.21,"y":67.93},{"x":47.17,"y":65.48},{"x":46.83,"y":62.84},{"x":46.59,"y":60.38},{"x":47.09,"y":57.78},{"x":48.26,"y":57.77},{"x":49.33,"y":60.22},{"x":50.15,"y":62.76},{"x":50.69,"y":65.37},{"x":50.62,"y":68.03},{"x":49.99,"y":70.61},{"x":50.34,"y":73.24},{"x":51.13,"y":75.78},{"x":52.07,"y":78.29},{"x":53.03,"y":80.78},{"x":54.13,"y":83.22},{"x":55.29,"y":85.63},{"x":56.59,"y":87.97},{"x":58.04,"y":90.21},{"x":59.61,"y":92.37},{"x":59.6,"y":92.7},{"x":57.79,"y":90.74},{"x":56.18,"y":88.6},{"x":54.77,"y":86.34},{"x":53.26,"y":84.14},{"x":51.41,"y":82.27},{"x":49.41,"y":80.51},{"x":47.73,"y":78.47},{"x":46.59,"y":76.09},{"x":45.6,"y":73.64},{"x":45.52,"y":71.66},{"x":47.5,"y":73.45},{"x":49.2,"y":75.51},{"x":50.45,"y":77.87},{"x":51.42,"y":80.37},{"x":52.44,"y":82.84},{"x":50.52,"y":81.51},{"x":48.39,"y":79.88},{"x":46.26,"y":78.27},{"x":45.27,"y":78.07},{"x":46.15,"y":78.28},{"x":44.09,"y":80.0},{"x":42.04,"y":81.72},{"x":41.88,"y":83.73},{"x":41.0,"y":82.6},{"x":38.84,"y":82.04},{"x":36.19,"y":81.67},{"x":33.75,"y":81.0},{"x":32.29,"y":78.76},{"x":30.62,"y":76.68},{"x":28.84,"y":74.68},{"x":27.3,"y":72.49},{"x":25.95,"y":70.24},{"x":23.86,"y":68.66},{"x":22.11,"y":66.67},{"x":20.8,"y":64.35},{"x":19.69,"y":61.95},{"x":18.78,"y":59.46},{"x":20.87,"y":60.92},{"x":22.7,"y":62.88},{"x":24.19,"y":65.09},{"x":25.65,"y":67.26},{"x":26.71,"y":69.72},{"x":28.13,"y":71.57},{"x":29.21,"y":74.01},{"x":30.83,"y":76.01},{"x":30.24,"y":73.83},{"x":29.01,"y":71.48},{"x":28.56,"y":68.88},{"x":28.62,"y":66.23},{"x":29.07,"y":63.6},{"x":29.55,"y":60.99},{"x":30.24,"y":61.25},{"x":31.22,"y":63.73},{"x":32.24,"y":66.19},{"x":32.72,"y":68.81},{"x":32.47,"y":71.47},{"x":31.69,"y":74.02},{"x":31.98,"y":76.61},{"x":32.98,"y":79.09},{"x":34.2,"y":81.47},{"x":34.64,"y":84.11},{"x":35.18,"y":86.72},{"x":37.0,"y":88.53},{"x":38.66,"y":90.63},{"x":36.71,"y":89.44},{"x":34.8,"y":88.01},{"x":35.0,"y":86.4},{"x":33.98,"y":83.93},{"x":32.91,"y":81.47},{"x":31.85,"y":79.01},{"x":30.78,"y":76.55},{"x":29.71,"y":74.09},{"x":28.65,"y":71.63},{"x":27.58,"y":69.18},{"x":26.92,"y":66.6},{"x":26.5,"y":64.0},{"x":25.38,"y":61.57},{"x":24.64,"y":59.01},{"x":24.59,"y":56.35},{"x":25.02,"y":53.71},{"x":25.53,"y":51.09},{"x":26.82,"y":52.79},{"x":27.87,"y":55.23},{"x":28.5,"y":57.81},{"x":28.62,"y":60.46},{"x":27.99,"y":63.04},{"x":27.11,"y":65.55},{"x":27.34,"y":68.21},{"x":26.21,"y":66.07},{"x":25.11,"y":63.62},{"x":23.9,"y":61.24},{"x":23.03,"y":58.8},{"x":23.31,"y":56.27},{"x":23.66,"y":58.24},{"x":24.13,"y":60.87},{"x":24.54,"y":62.35},{"x":23.42,"y":59.91},{"x":22.1,"y":57.68},{"x":20.26,"y":55.79},{"x":18.49,"y":53.8},{"x":17.29,"y":51.54},{"x":16.49,"y":49.05},{"x":15.87,"y":46.59},{"x":18.15,"y":47.82},{"x":19.96,"y":49.78},{"x":21.33,"y":52.07},{"x":22.49,"y":54.44},{"x":22.51,"y":57.12},{"x":23.16,"y":56.25},{"x":23.37,"y":53.76},{"x":22.13,"y":51.4},{"x":20.92,"y":49.01},{"x":20.41,"y":46.42},{"x":20.53,"y":43.75},{"x":21.46,"y":42.57},{"x":23.1,"y":44.67},{"x":24.39,"y":47.01},{"x":25.0,"y":49.6},{"x":24.33,"y":52.15},{"x":24.06,"y":54.38},{"x":26.49,"y":53.25},{"x":27.35,"y":51.52},{"x":25.91,"y":49.38},{"x":25.34,"y":46.77},{"x":24.95,"y":44.88},{"x":26.95,"y":46.64},{"x":28.64,"y":48.71},{"x":29.91,"y":51.06},{"x":30.83,"y":53.57},{"x":31.3,"y":56.19},{"x":32.09,"y":58.72},{"x":32.34,"y":60.26},{"x":31.43,"y":57.81},{"x":29.66,"y":55.81},{"x":28.31,"y":53.53},{"x":29.4,"y":51.9},{"x":30.62,"y":50.27},{"x":29.89,"y":47.74},{"x":29.98,"y":45.19},{"x":30.39,"y":47.81},{"x":31.28,"y":47.71},{"x":31.96,"y":45.13},{"x":33.14,"y":42.74},{"x":34.49,"y":40.45},{"x":35.14,"y":42.75},{"x":35.33,"y":45.41},{"x":34.81,"y":47.5},{"x":32.66,"y":47.8},{"x":31.94,"y":50.36},{"x":31.04,"y":51.32},{"x":32.76,"y":50.73},{"x":33.49,"y":48.16},{"x":34.84,"y":49.92},{"x":35.69,"y":52.46},{"x":36.03,"y":55.1},{"x":35.93,"y":57.75},{"x":35.23,"y":60.32},{"x":34.04,"y":61.04},{"x":33.04,"y":58.56},{"x":32.24,"y":56.01},{"x":32.15,"y":53.36},{"x":31.99,"y":50.85},{"x":30.6,"y":48.55},{"x":29.21,"y":46.26},{"x":27.62,"y":44.15},{"x":26.39,"y":41.79},{"x":25.75,"y":39.22},{"x":25.46,"y":36.61},{"x":25.72,"y":33.96},{"x":26.82,"y":34.18},{"x":28.16,"y":36.5},{"x":29.26,"y":38.92},{"x":29.57,"y":41.56},{"x":29.2,"y":44.2},{"x":29.42,"y":44.95},{"x":30.46,"y":42.48},{"x":30.46,"y":39.8},{"x":31.1,"y":37.22},{"x":32.55,"y":34.98},{"x":34.34,"y":32.99},{"x":36.28,"y":31.78},{"x":35.85,"y":34.41},{"x":35.2,"y":36.99},{"x":33.89,"y":39.32},{"x":32.01,"y":41.2},{"x":30.37,"y":41.79},{"x":30.02,"y":39.14},{"x":29.35,"y":36.57},{"x":29.19,"y":33.94},{"x":29.48,"y":31.29},{"x":30.03,"y":28.68},{"x":31.32,"y":26.35},{"x":33.03,"y":24.31},{"x":34.83,"y":22.33},{"x":35.11,"y":24.48},{"x":34.54,"y":27.08},{"x":33.68,"y":29.61},{"x":32.45,"y":31.82},{"x":30.7,"y":33.67},{"x":29.32,"y":35.91},{"x":30.79,"y":35.52},{"x":30.05,"y":37.35},{"x":31.5,"y":35.1},{"x":32.94,"y":32.84},{"x":34.39,"y":30.58},{"x":35.81,"y":28.31},{"x":37.2,"y":26.03},{"x":38.94,"y":24.01},{"x":41.38,"y":22.95},{"x":43.16,"y":23.1},{"x":41.88,"y":25.45},{"x":40.0,"y":27.33},{"x":37.63,"y":28.51},{"x":35.66,"y":28.06},{"x":36.03,"y":25.41},{"x":37.07,"y":22.96},{"x":38.26,"y":20.58},{"x":39.78,"y":18.38},{"x":41.8,"y":16.64},{"x":44.25,"y":15.59},{"x":46.28,"y":15.5},{"x":44.89,"y":17.77},{"x":43.46,"y":20.02},{"x":41.13,"y":21.3},{"x":38.58,"y":22.07},{"x":36.91,"y":23.91},{"x":36.23,"y":26.1},{"x":38.64,"y":27.28},{"x":41.04,"y":28.46},{"x":43.45,"y":29.63},{"x":45.86,"y":30.81},{"x":48.27,"y":31.99},{"x":50.68,"y":33.17},{"x":53.09,"y":34.35},{"x":54.53,"y":32.35},{"x":54.8,"y":34.63},{"x":54.25,"y":37.25},{"x":53.49,"y":39.8},{"x":52.38,"y":42.24},{"x":51.06,"y":44.08},{"x":51.2,"y":41.42},{"x":51.63,"y":38.79},{"x":52.54,"y":36.28},{"x":53.61,"y":35.22},{"x":54.62,"y":37.71},{"x":55.62,"y":40.19},{"x":56.47,"y":42.51},{"x":56.25,"y":45.17},{"x":55.7,"y":47.79},{"x":54.55,"y":50.19},{"x":52.9,"y":52.29},{"x":51.26,"y":54.37},{"x":50.42,"y":56.91},{"x":50.43,"y":55.69},{"x":50.75,"y":53.05},{"x":51.16,"y":50.41},{"x":51.95,"y":47.87},{"x":53.35,"y":45.61},{"x":54.85,"y":43.4},{"x":55.74,"y":41.35},{"x":53.53,"y":42.86},{"x":51.32,"y":44.38},{"x":49.12,"y":45.9},{"x":49.08,"y":48.07},{"x":49.8,"y":50.63},{"x":49.88,"y":53.3},{"x":49.5,"y":55.94},{"x":48.52,"y":56.22},{"x":46.95,"y":54.45},{"x":46.83,"y":51.8},{"x":47.26,"y":49.17},{"x":47.62,"y":46.52},{"x":49.5,"y":47.37},{"x":51.57,"y":49.07},{"x":53.64,"y":50.77},{"x":55.71,"y":52.48},{"x":57.79,"y":54.18},{"x":59.86,"y":55.88},{"x":61.93,"y":57.58},{"x":64.0,"y":59.28},{"x":65.48,"y":61.4},{"x":66.41,"y":63.9},{"x":66.88,"y":66.53},{"x":66.61,"y":69.18},{"x":65.88,"y":71.75},{"x":65.42,"y":74.37},{"x":65.55,"y":77.04},{"x":65.41,"y":77.55},{"x":65.04,"y":74.91},{"x":64.94,"y":72.28},{"x":63.99,"y":69.83},{"x":63.16,"y":67.37},{"x":63.46,"y":64.73},{"x":63.94,"y":62.12},{"x":64.1,"y":59.46},{"x":65.54,"y":61.54},{"x":67.01,"y":63.77},{"x":68.49,"y":66.01},{"x":69.79,"y":68.15},{"x":70.26,"y":70.78},{"x":70.29,"y":73.45},{"x":69.9,"y":76.08},{"x":68.94,"y":78.57},{"x":67.41,"y":80.45},{"x":66.54,"y":77.94},{"x":66.18,"y":75.32},{"x":66.54,"y":72.68},{"x":67.62,"y":70.24},{"x":68.87,"y":67.87},{"x":69.36,"y":69.15},{"x":69.52,"y":71.82},{"x":69.69,"y":74.5},{"x":69.86,"y":77.18},{"x":70.73,"y":79.45},{"x":71.81,"y":81.88},{"x":72.62,"y":84.43},{"x":73.6,"y":86.92},{"x":74.3,"y":89.49},{"x":74.27,"y":92.14},{"x":73.32,"y":93.79},{"x":71.79,"y":91.61},{"x":70.68,"y":89.2},{"x":70.0,"y":86.63},{"x":70.32,"y":84.0},{"x":70.45,"y":81.35},{"x":69.78,"y":79.18},{"x":67.85,"y":81.05},{"x":67.44,"y":83.48},{"x":67.32,"y":83.77},{"x":66.48,"y":81.24},{"x":66.15,"y":79.71},{"x":66.9,"y":81.81},{"x":66.2,"y":83.65},{"x":67.06,"y":86.18},{"x":65.17,"y":85.94},{"x":63.13,"y":84.28},{"x":61.7,"y":82.06},{"x":60.53,"y":79.65},{"x":59.6,"y":77.16},{"x":61.19,"y":77.78},{"x":63.23,"y":79.51},{"x":64.93,"y":81.56},{"x":66.39,"y":83.8},{"x":67.79,"y":86.09},{"x":68.99,"y":88.48},{"x":70.19,"y":90.87},{"x":69.77,"y":90.78},{"x":68.4,"y":88.52},{"x":68.03,"y":88.58},{"x":66.99,"y":91.05},{"x":68.95,"y":92.37},{"x":71.32,"y":93.59},{"x":73.33,"y":95.36},{"x":74.84,"y":97.52},{"x":76.01,"y":99.93},{"x":74.72,"y":100.26},{"x":72.46,"y":98.83},{"x":70.48,"y":97.04},{"x":69.15,"y":94.73},{"x":67.7,"y":92.48},{"x":67.85,"y":91.01},{"x":70.37,"y":90.09},{"x":72.89,"y":89.16},{"x":75.4,"y":88.24},{"x":77.24,"y":86.79},{"x":76.42,"y":84.63},{"x":75.8,"y":82.25},{"x":75.48,"y":79.97},{"x":76.34,"y":78.32},{"x":77.56,"y":76.12},{"x":79.3,"y":74.39},{"x":81.14,"y":73.08},{"x":83.64,"y":72.57},{"x":86.14,"y":73.0},{"x":88.44,"y":73.35},{"x":90.28,"y":74.61},{"x":91.88,"y":75.99},{"x":92.47,"y":78.23},{"x":93.07,"y":79.86},{"x":93.07,"y":81.94},{"x":92.67,"y":84.22},{"x":91.09,"y":86.15},{"x":90.13,"y":88.46},{"x":88.16,"y":90.07},{"x":87.69,"y":89.34},{"x":89.21,"y":87.15},{"x":89.03,"y":85.35},{"x":87.65,"y":87.63},{"x":85.83,"y":89.48},{"x":83.29,"y":89.57},{"x":81.52,"y":88.54},{"x":80.27,"y":86.17},{"x":79.33,"y":87.39},{"x":80.71,"y":89.68},{"x":80.08,"y":90.51},{"x":78.55,"y":88.78},{"x":77.55,"y":87.85},{"x":79.9,"y":89.15},{"x":82.25,"y":90.44},{"x":84.25,"y":91.08},{"x":83.27,"y":91.66},{"x":83.66,"y":93.12},{"x":84.23,"y":95.72},{"x":85.11,"y":97.93},{"x":83.24,"y":98.73},{"x":81.52,"y":98.4},{"x":83.7,"y":97.38},{"x":83.45,"y":96.29},{"x":81.33,"y":97.94},{"x":79.22,"y":99.58},{"x":77.1,"y":101.22},{"x":78.29,"y":103.45},{"x":79.89,"y":105.59},{"x":80.05,"y":106.16},{"x":78.34,"y":104.1},{"x":76.64,"y":102.06},{"x":75.8,"y":100.29},{"x":73.84,"y":98.45},{"x":71.89,"y":96.62},{"x":69.93,"y":94.78},{"x":67.98,"y":92.95},{"x":66.03,"y":91.11},{"x":64.07,"y":89.28},{"x":62.12,"y":87.44},{"x":60.16,"y":85.61},{"x":58.21,"y":83.77},{"x":56.25,"y":81.94},{"x":54.3,"y":80.1},{"x":52.35,"y":78.27},{"x":50.39,"y":76.43},{"x":48.44,"y":74.6},{"x":46.48,"y":72.76},{"x":44.53,"y":70.93},{"x":42.57,"y":69.09},{"x":40.62,"y":67.26},{"x":38.66,"y":65.42},{"x":36.71,"y":63.59},{"x":34.76,"y":61.75},{"x":32.8,"y":59.92},{"x":30.85,"y":58.08},{"x":28.89,"y":56.25},{"x":26.94,"y":54.41},{"x":24.98,"y":52.58},{"x":23.03,"y":50.74},{"x":21.08,"y":48.91},{"x":19.04,"y":47.21},{"x":17.09,"y":45.47},{"x":16.55,"y":42.88},{"x":16.36,"y":40.22},{"x":16.74,"y":37.66},{"x":18.14,"y":39.91},{"x":19.37,"y":42.29},{"x":19.61,"y":44.89},{"x":19.64,"y":47.56}]];
+}
+
+function countStrokePoints(list){
+  return list.reduce((sum,s)=>sum+s.length,0);
+}
+
+document.getElementById('riceBtn').onclick=async()=>{
+  strokes=riceEarStrokes();
+  activeStroke=null;
+  drawing=false;
+  ricePresetSelected=true;
+  loopMode=false;
+  setModeButton();
+  redraw();
+  statusEl.textContent='询问笔仙...';
+  try{
+    await sendMode();
+    const saved=await post('/ricePreset');
+    const started=await post('/start');
+    statusEl.textContent=`${saved} ${started}`;
+  }catch(e){
+    statusEl.textContent='笔仙没连上，请重新连接热点';
+  }
+};
+
+document.getElementById('imageInput').onchange=async e=>{
+  const file=e.target.files && e.target.files[0];
+  if(!file)return;
+  statusEl.textContent='正在提取轮廓...';
+  try{
+    const stroke=await contourFromImage(file);
+    strokes=[stroke];
+    activeStroke=null;
+    drawing=false;
+    ricePresetSelected=false;
+    redraw();
+    statusEl.textContent='已生成一笔轮廓轨迹，'+stroke.length+' 个点';
+  }catch(err){
+    statusEl.textContent='图片轮廓提取失败';
+  }finally{
+    e.target.value='';
+  }
+};
+
+function loadImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{URL.revokeObjectURL(img.src);resolve(img);};
+    img.onerror=reject;
+    img.src=URL.createObjectURL(file);
+  });
+}
+
+function otsuThreshold(hist,total){
+  let sum=0;
+  for(let i=0;i<256;i++)sum+=i*hist[i];
+  let sumB=0,wB=0,best=0,maxVar=-1;
+  for(let t=0;t<256;t++){
+    wB+=hist[t];
+    if(wB===0)continue;
+    const wF=total-wB;
+    if(wF===0)break;
+    sumB+=t*hist[t];
+    const mB=sumB/wB;
+    const mF=(sum-sumB)/wF;
+    const between=wB*wF*(mB-mF)*(mB-mF);
+    if(between>maxVar){maxVar=between;best=t;}
+  }
+  return best;
+}
+
+async function contourFromImage(file){
+  const img=await loadImageFile(file);
+  const N=128;
+  const off=document.createElement('canvas');
+  off.width=N; off.height=N;
+  const c=off.getContext('2d',{willReadFrequently:true});
+  c.fillStyle='#fff';
+  c.fillRect(0,0,N,N);
+  const scale=Math.min(N/img.width,N/img.height);
+  const w=img.width*scale, h=img.height*scale;
+  c.drawImage(img,(N-w)/2,(N-h)/2,w,h);
+  const data=c.getImageData(0,0,N,N).data;
+  const gray=new Uint8Array(N*N);
+  const hist=new Array(256).fill(0);
+  for(let i=0,p=0;i<data.length;i+=4,p++){
+    const g=Math.round(0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]);
+    gray[p]=g; hist[g]++;
+  }
+  const threshold=otsuThreshold(hist,N*N);
+  let borderSum=0,borderCount=0;
+  for(let y=0;y<N;y++){
+    for(let x=0;x<N;x++){
+      if(x===0||y===0||x===N-1||y===N-1){borderSum+=gray[y*N+x];borderCount++;}
+    }
+  }
+  const borderMean=borderSum/borderCount;
+  const foregroundDark=borderMean>128;
+  const mask=new Uint8Array(N*N);
+  for(let p=0;p<N*N;p++){
+    mask[p]=foregroundDark ? (gray[p]<threshold ? 1:0) : (gray[p]>threshold ? 1:0);
+  }
+  const comp=largestComponent(mask,N);
+  const boundary=[];
+  for(let y=1;y<N-1;y++){
+    for(let x=1;x<N-1;x++){
+      const p=y*N+x;
+      if(!comp[p])continue;
+      if(!comp[p-1]||!comp[p+1]||!comp[p-N]||!comp[p+N])boundary.push({x,y});
+    }
+  }
+  if(boundary.length<8)throw new Error('no contour');
+  const ordered=orderBoundary(boundary);
+  const mm=ordered.map(p=>({x:p.x/(N-1)*L0,y:(1-p.y/(N-1))*L0}));
+  const simplified=simplifyStroke(mm,1.2,520);
+  if(simplified.length<3)throw new Error('short contour');
+  const first=simplified[0], last=simplified[simplified.length-1];
+  if(Math.hypot(first.x-last.x,first.y-last.y)>1.5)simplified.push({x:first.x,y:first.y});
+  return simplified;
+}
+
+function largestComponent(mask,N){
+  const visited=new Uint8Array(N*N);
+  let best=[];
+  const qx=new Int16Array(N*N), qy=new Int16Array(N*N);
+  for(let y=0;y<N;y++){
+    for(let x=0;x<N;x++){
+      const start=y*N+x;
+      if(!mask[start]||visited[start])continue;
+      let head=0,tail=0;
+      const pts=[];
+      qx[tail]=x; qy[tail]=y; tail++; visited[start]=1;
+      while(head<tail){
+        const cx=qx[head], cy=qy[head]; head++;
+        pts.push(cy*N+cx);
+        const nb=[[cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]];
+        for(const [nx,ny] of nb){
+          if(nx<0||ny<0||nx>=N||ny>=N)continue;
+          const np=ny*N+nx;
+          if(mask[np]&&!visited[np]){
+            visited[np]=1; qx[tail]=nx; qy[tail]=ny; tail++;
+          }
+        }
+      }
+      if(pts.length>best.length)best=pts;
+    }
+  }
+  const out=new Uint8Array(N*N);
+  for(const p of best)out[p]=1;
+  return out;
+}
+
+function orderBoundary(points){
+  let cx=0,cy=0;
+  for(const p of points){cx+=p.x;cy+=p.y;}
+  cx/=points.length; cy/=points.length;
+  points.sort((a,b)=>Math.atan2(a.y-cy,a.x-cx)-Math.atan2(b.y-cy,b.x-cx));
+  return points;
+}
+
+function simplifyStroke(points,minDist,maxPoints){
+  const out=[];
+  for(const p of points){
+    const last=out[out.length-1];
+    if(!last||Math.hypot(p.x-last.x,p.y-last.y)>=minDist)out.push(p);
+  }
+  while(out.length>maxPoints){
+    const reduced=[];
+    for(let i=0;i<out.length;i+=2)reduced.push(out[i]);
+    out.length=0; out.push(...reduced);
+  }
+  return out;
+}
 
 let speedTimer=0;
 speed.oninput=()=>{
@@ -1278,6 +1607,29 @@ bool loadWebPath(const String &body) {
     return webStrokeCount > 0 && webPathPointCount >= 2;
 }
 
+bool loadRicePresetPath() {
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+
+    const int count = min((int)ricePresetPointCount, maxWebPathPoints);
+    for (int i = 0; i < count; i++) {
+        RicePresetPoint preset;
+        memcpy_P(&preset, &ricePresetPath[i], sizeof(preset));
+        webPath[webPathPointCount].x10 = preset.x10;
+        webPath[webPathPointCount].y10 = preset.y10;
+        webPath[webPathPointCount].draw = preset.draw ? 1 : 0;
+        if (!preset.draw) {
+            webStrokeCount++;
+        }
+        webPathPointCount++;
+    }
+
+    Serial0.printf("Rice preset loaded: strokes=%d points=%d\n",
+                   webStrokeCount, webPathPointCount);
+    return webPathPointCount >= 2;
+}
+
 void handleRootPage() {
     webServer.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     webServer.sendHeader("Pragma", "no-cache");
@@ -1293,6 +1645,16 @@ void handlePathUpload() {
                        "轨迹已保存: " + String(webStrokeCount) + " 笔, " + String(webPathPointCount) + " 点");
     } else {
         webServer.send(400, "text/plain; charset=utf-8", "轨迹太短");
+    }
+}
+
+void handleRicePresetUpload() {
+    bool ok = loadRicePresetPath();
+    if (ok) {
+        webServer.send(200, "text/plain; charset=utf-8",
+                       "稻穗轨迹已载入: " + String(webStrokeCount) + " 笔, " + String(webPathPointCount) + " 点");
+    } else {
+        webServer.send(500, "text/plain; charset=utf-8", "稻穗轨迹载入失败");
     }
 }
 
@@ -1451,6 +1813,7 @@ void setupWebPortal() {
 
     webServer.on("/", HTTP_GET, handleRootPage);
     webServer.on("/path", HTTP_POST, handlePathUpload);
+    webServer.on("/ricePreset", HTTP_POST, handleRicePresetUpload);
     webServer.on("/start", HTTP_POST, handleStartPlayback);
     webServer.on("/stop", HTTP_POST, handleStopPlayback);
     webServer.on("/speed", HTTP_POST, handleSpeedChange);
@@ -1607,6 +1970,11 @@ bool parseNewCommand(String s) {
 
     if (s == "shapes" || s == "testshapes") {
         drawShapeTests();
+        return true;
+    }
+
+    if (s == "ricepreset" || s == "rice") {
+        loadRicePresetPath();
         return true;
     }
 
