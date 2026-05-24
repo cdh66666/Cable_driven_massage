@@ -5,3 +5,8 @@
 *.bin
 *.elf
 *.map
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc

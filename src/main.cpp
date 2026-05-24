@@ -1,16 +1,16 @@
 #include <Arduino.h>
 #include <math.h>
+#include <string.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include "rice_preset.h"
 
-// PlatformIO 的 ESP32 Arduino core 使用 Serial 作为默认调试串口。
-#ifndef Serial0
-#define Serial0 Serial
-#endif
+HardwareSerial debugSerial(0);
+#define Serial0 debugSerial
 
+// PlatformIO 的 ESP32 Arduino core 使用 Serial 作为默认调试串口。
 // 硬件状态：四个电机共同拉着一个小球，电机分布在左下、左上、右上、右下；
 // 对应 (x,y) 坐标为 (0,0), (0,15cm), (15cm,15cm), (15cm,0)。
 
@@ -742,21 +742,23 @@ DNSServer dnsServer;
 WebServer webServer(80);
 
 struct WebPathPoint {
-    uint16_t x10;
-    uint16_t y10;
+    uint16_t x100;
+    uint16_t y100;
     uint8_t draw;
 };
 
-const int maxWebPathPoints = 20000;
-const float webResampleMm = 0.15f;
+const int maxWebPathPoints = 200000;
+const float webResampleMm = 0.5f;
 const float webTravelResampleMm = 1.5f;
 const uint16_t minWebStepDelayMs = 8;
 const uint16_t maxWebStepDelayMs = 80;
 
-WebPathPoint webPath[maxWebPathPoints];
+WebPathPoint *webPath = nullptr;
 int webPathPointCount = 0;
 int webStrokeCount = 0;
 int webPlaybackIndex = 0;
+uint32_t webPathVersion = 0;
+const char *webPathSource = "none";
 bool webPlaybackActive = false;
 bool webLoopPlayback = true;
 uint8_t webSpeedPercent = 50;
@@ -772,6 +774,38 @@ int webTravelSteps = 0;
 bool webCalibrationRequested = false;
 bool webCalibrationRunning = false;
 bool webCalibrationDone = false;
+bool usbPathUploadActive = false;
+bool usbBinaryUploadActive = false;
+bool usbPathStrokeOpen = false;
+bool usbPathStrokeHasDraw = false;
+int usbPathStrokeStartPointCount = 0;
+int usbPathRawPointCount = 0;
+int usbBinaryExpectedPoints = 0;
+int usbBinaryReceivedPoints = 0;
+uint8_t usbBinaryBuf[5] = {0};
+uint8_t usbBinaryBufIndex = 0;
+float usbPathPrevX = 0.0f;
+float usbPathPrevY = 0.0f;
+
+bool ensureWebPathBuffer() {
+    if (webPath) {
+        return true;
+    }
+
+    const size_t bytes = sizeof(WebPathPoint) * maxWebPathPoints;
+    webPath = (WebPathPoint *)ps_malloc(bytes);
+    if (!webPath) {
+        webPath = (WebPathPoint *)malloc(bytes);
+    }
+    if (!webPath) {
+        Serial0.printf("Web path buffer allocation failed: %u bytes\n", (unsigned)bytes);
+        return false;
+    }
+
+    memset(webPath, 0, bytes);
+    Serial0.printf("Web path buffer ready: %d points, %u bytes\n", maxWebPathPoints, (unsigned)bytes);
+    return true;
+}
 
 const char indexHtml[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -813,9 +847,11 @@ input[type=file]{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
   <button id="clear" class="clear">清除画布</button>
   <button id="mode" class="mode">循环: 开</button>
   <button id="calibrate" class="calib">校准参数</button>
+  <button id="importPathBtn" class="upload">导入轨迹</button>
   <button id="riceBtn" class="image">询问机仙</button>
 </div>
 <input id="imageInput" type="file" accept="image/*">
+<input id="pathInput" type="file" accept=".txt,.json,text/plain,application/json">
 <div class="speed">
   <span>绘制</span>
   <input id="speed" type="range" min="1" max="100" value="50">
@@ -859,6 +895,7 @@ let strokes=[];
 let activeStroke=null;
 let loopMode=true;
 let ricePresetSelected=false;
+let lastBoardPathVersion=-1;
 const ricePresetPointCount=18000;
 let cssSize=0;
 
@@ -943,6 +980,81 @@ function pathBody(){
     .join('\n');
 }
 
+function normalizePoint(p){
+  if(Array.isArray(p) && p.length>=2){
+    return {x:Math.min(Math.max(Number(p[0]),0),L0),y:Math.min(Math.max(Number(p[1]),0),L0)};
+  }
+  return {x:Math.min(Math.max(Number(p.x),0),L0),y:Math.min(Math.max(Number(p.y),0),L0)};
+}
+
+function limitStrokesByPointCount(list,maxPoints){
+  const total=list.reduce((sum,s)=>sum+s.length,0);
+  if(maxPoints<=0)return {strokes:list,reduced:false};
+  if(total<=maxPoints)return {strokes:list,reduced:false};
+  const scale=total/maxPoints;
+  const out=list.map(stroke=>{
+    const keep=Math.max(2,Math.round(stroke.length/scale));
+    if(keep>=stroke.length)return stroke;
+    const next=[];
+    for(let i=0;i<keep;i++){
+      const idx=Math.round(i*(stroke.length-1)/(keep-1));
+      next.push(stroke[idx]);
+    }
+    return next;
+  }).filter(s=>s.length>=2);
+  return {strokes:out,reduced:true};
+}
+
+function parseTrajectoryFile(text){
+  const trimmed=text.trim();
+  if(!trimmed)throw new Error('empty');
+  if(trimmed[0]==='['){
+    const data=JSON.parse(trimmed);
+    if(!Array.isArray(data))throw new Error('bad json');
+    return data.map(stroke=>stroke.map(normalizePoint)).filter(s=>s.length>=2);
+  }
+  return trimmed.split(/\r?\n/)
+    .map(line=>line.trim())
+    .filter(Boolean)
+    .map(line=>line.split(';').map(pair=>{
+      const parts=pair.trim().split(',');
+      if(parts.length<2)throw new Error('bad txt');
+      return normalizePoint([parts[0],parts[1]]);
+    }).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)))
+    .filter(s=>s.length>=2);
+}
+
+async function syncBoardPath(s){
+  if(!s || !Number.isFinite(s.pathVersion))return;
+  if(s.pathVersion===lastBoardPathVersion)return;
+  lastBoardPathVersion=s.pathVersion;
+  if(s.points<2){
+    if(s.pathSource==='none'){
+      strokes=[];
+      activeStroke=null;
+      redraw();
+      statusEl.textContent='板子轨迹已清空';
+    }
+    return;
+  }
+  if(s.pathSource!=='usb' && s.pathSource!=='web' && s.pathSource!=='preset')return;
+  try{
+    const text=await (await fetch('/pathPreview?ver='+s.pathVersion,{cache:'no-store'})).text();
+    const parsed=parseTrajectoryFile(text);
+    if(parsed.length){
+      strokes=parsed;
+      activeStroke=null;
+      drawing=false;
+      ricePresetSelected=s.pathSource==='preset';
+      redraw();
+      const source=s.pathSource==='usb'?'USB':(s.pathSource==='preset'?'内置图案':'网页/工具');
+      statusEl.textContent='已从'+source+'加载 '+s.strokes+' 段，板子 '+s.points+' 点，画布显示预览点 '+pointCount();
+    }
+  }catch(e){
+    statusEl.textContent='板子已有轨迹 '+s.strokes+' 段，'+s.points+' 点，但预览拉取失败';
+  }
+}
+
 async function post(url,body){
   const opt={method:'POST'};
   if(body!==undefined){opt.headers={'Content-Type':'text/plain'};opt.body=body;}
@@ -1001,7 +1113,8 @@ async function loadStatus(){
     loopMode=!!s.loop;
     setModeButton();
     renderCoef(s);
-    statusEl.textContent='已连接';
+    await syncBoardPath(s);
+    if(statusEl.textContent==='')statusEl.textContent='已连接';
   }catch(e){
     statusEl.textContent='已打开画板';
   }
@@ -1032,6 +1145,31 @@ document.getElementById('clear').onclick=async()=>{
 modeBtn.onclick=async()=>{
   loopMode=!loopMode;
   statusEl.textContent=await sendMode();
+};
+
+document.getElementById('importPathBtn').onclick=()=>{
+  document.getElementById('pathInput').click();
+};
+
+document.getElementById('pathInput').onchange=async e=>{
+  const file=e.target.files && e.target.files[0];
+  if(!file)return;
+  try{
+    const text=await file.text();
+    const parsed=parseTrajectoryFile(text);
+    const limited=limitStrokesByPointCount(parsed,0);
+    strokes=limited.strokes;
+    activeStroke=null;
+    drawing=false;
+    ricePresetSelected=false;
+    redraw();
+    const msg=limited.reduced?'，已压缩到硬件安全点数':'';
+    statusEl.textContent='已导入 '+strokes.length+' 段，'+pointCount()+' 点'+msg;
+  }catch(err){
+    statusEl.textContent='轨迹文件读取失败，请导入 TXT 或 JSON';
+  }finally{
+    e.target.value='';
+  }
 };
 
 async function pollCalibration(){
@@ -1412,6 +1550,7 @@ setInterval(async()=>{
   try{
     const s=await fetchStatus(1200);
     renderCoef(s);
+    await syncBoardPath(s);
   }catch(e){}
 },3000);
 </script>
@@ -1477,24 +1616,34 @@ void stopWebPlayback(bool disableMotors) {
 }
 
 void appendWebPoint(float x, float y, bool draw) {
-    if (webPathPointCount >= maxWebPathPoints) {
+    if (!webPath || webPathPointCount >= maxWebPathPoints) {
         return;
     }
 
     x = constrain(x, 0.0f, L0);
     y = constrain(y, 0.0f, L0);
-    uint16_t x10 = (uint16_t)lroundf(x * 10.0f);
-    uint16_t y10 = (uint16_t)lroundf(y * 10.0f);
+    uint16_t x100 = (uint16_t)lroundf(x * 100.0f);
+    uint16_t y100 = (uint16_t)lroundf(y * 100.0f);
 
     if (webPathPointCount > 0 &&
-        webPath[webPathPointCount - 1].x10 == x10 &&
-        webPath[webPathPointCount - 1].y10 == y10 &&
+        webPath[webPathPointCount - 1].x100 == x100 &&
+        webPath[webPathPointCount - 1].y100 == y100 &&
         webPath[webPathPointCount - 1].draw == (draw ? 1 : 0)) {
         return;
     }
 
-    webPath[webPathPointCount].x10 = x10;
-    webPath[webPathPointCount].y10 = y10;
+    webPath[webPathPointCount].x100 = x100;
+    webPath[webPathPointCount].y100 = y100;
+    webPath[webPathPointCount].draw = draw ? 1 : 0;
+    webPathPointCount++;
+}
+
+void appendWebEncodedPoint(uint16_t x100, uint16_t y100, bool draw) {
+    if (!webPath || webPathPointCount >= maxWebPathPoints) {
+        return;
+    }
+    webPath[webPathPointCount].x100 = (uint16_t)min((int)x100, (int)(L0 * 100.0f));
+    webPath[webPathPointCount].y100 = (uint16_t)min((int)y100, (int)(L0 * 100.0f));
     webPath[webPathPointCount].draw = draw ? 1 : 0;
     webPathPointCount++;
 }
@@ -1510,6 +1659,8 @@ void appendWebSegment(float fromX, float fromY, float toX, float toY, bool draw)
         appendWebPoint(fromX + dx * t, fromY + dy * t, draw);
     }
 }
+
+void appendWebSegmentDirect(float toX, float toY, bool draw);
 
 bool readNextPair(const String &body, int &idx, float &x, float &y) {
     int len = body.length();
@@ -1553,7 +1704,7 @@ bool loadWebStroke(const String &stroke, int &rawCount) {
             appendWebPoint(x, y, false);
             hasPrev = true;
         } else {
-            appendWebSegment(prevX, prevY, x, y, true);
+            appendWebSegmentDirect(x, y, true);
             hasDrawSegment = true;
         }
 
@@ -1576,6 +1727,9 @@ bool loadWebStroke(const String &stroke, int &rawCount) {
 }
 
 bool loadWebPath(const String &body) {
+    if (!ensureWebPathBuffer()) {
+        return false;
+    }
     stopWebPlayback(true);
     webPathPointCount = 0;
     webStrokeCount = 0;
@@ -1598,10 +1752,15 @@ bool loadWebPath(const String &body) {
 
     Serial0.printf("Web path loaded: strokes=%d raw=%d resampled=%d\n",
                    webStrokeCount, rawCount, webPathPointCount);
+    webPathVersion++;
+    webPathSource = "web";
     return webStrokeCount > 0 && webPathPointCount >= 2;
 }
 
 bool loadRicePresetPath() {
+    if (!ensureWebPathBuffer()) {
+        return false;
+    }
     stopWebPlayback(true);
     webPathPointCount = 0;
     webStrokeCount = 0;
@@ -1610,8 +1769,8 @@ bool loadRicePresetPath() {
     for (int i = 0; i < count; i++) {
         RicePresetPoint preset;
         memcpy_P(&preset, &ricePresetPath[i], sizeof(preset));
-        webPath[webPathPointCount].x10 = preset.x10;
-        webPath[webPathPointCount].y10 = preset.y10;
+        webPath[webPathPointCount].x100 = preset.x10 * 10;
+        webPath[webPathPointCount].y100 = preset.y10 * 10;
         webPath[webPathPointCount].draw = preset.draw ? 1 : 0;
         if (!preset.draw) {
             webStrokeCount++;
@@ -1621,7 +1780,197 @@ bool loadRicePresetPath() {
 
     Serial0.printf("Rice preset loaded: strokes=%d points=%d\n",
                    webStrokeCount, webPathPointCount);
+    webPathVersion++;
+    webPathSource = "preset";
     return webPathPointCount >= 2;
+}
+
+void closeUsbPathStrokeIfEmpty() {
+    if (usbPathStrokeOpen && !usbPathStrokeHasDraw) {
+        webPathPointCount = usbPathStrokeStartPointCount;
+    }
+}
+
+void appendWebSegmentDirect(float toX, float toY, bool draw) {
+    appendWebPoint(toX, toY, draw);
+}
+
+bool parseUsbPathPoint(const String &line, float &x, float &y) {
+    int c1 = line.indexOf(',');
+    int c2 = line.indexOf(',', c1 + 1);
+    if (c1 < 0 || c2 < 0) {
+        return false;
+    }
+    x = constrain(line.substring(c1 + 1, c2).toFloat(), 0.0f, L0);
+    y = constrain(line.substring(c2 + 1).toFloat(), 0.0f, L0);
+    return true;
+}
+
+void beginUsbPathUpload() {
+    if (!ensureWebPathBuffer()) {
+        Serial0.println("USBPATH ERROR no-buffer");
+        return;
+    }
+
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+    usbPathRawPointCount = 0;
+    usbPathStrokeOpen = false;
+    usbPathStrokeHasDraw = false;
+    usbPathStrokeStartPointCount = 0;
+    usbPathPrevX = 0.0f;
+    usbPathPrevY = 0.0f;
+    usbPathUploadActive = true;
+    Serial0.println("USBPATH READY");
+}
+
+void abortUsbPathUpload() {
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+    webPathVersion++;
+    webPathSource = "none";
+    usbPathUploadActive = false;
+    usbPathStrokeOpen = false;
+    usbPathStrokeHasDraw = false;
+    Serial0.println("USBPATH ABORTED");
+}
+
+void finishUsbPathUpload() {
+    closeUsbPathStrokeIfEmpty();
+    usbPathUploadActive = false;
+    usbPathStrokeOpen = false;
+    usbPathStrokeHasDraw = false;
+    webPathVersion++;
+    webPathSource = "usb";
+    Serial0.printf("USBPATH OK strokes=%d raw=%d points=%d\n",
+                   webStrokeCount, usbPathRawPointCount, webPathPointCount);
+}
+
+void beginUsbBinaryUpload(int expectedPoints) {
+    if (!ensureWebPathBuffer()) {
+        Serial0.println("USBBIN ERROR no-buffer");
+        return;
+    }
+    if (expectedPoints <= 1 || expectedPoints > maxWebPathPoints) {
+        Serial0.printf("USBBIN ERROR bad-count max=%d\n", maxWebPathPoints);
+        return;
+    }
+
+    stopWebPlayback(true);
+    webPathPointCount = 0;
+    webStrokeCount = 0;
+    usbPathRawPointCount = 0;
+    usbPathStrokeOpen = false;
+    usbPathStrokeHasDraw = false;
+    usbBinaryExpectedPoints = expectedPoints;
+    usbBinaryReceivedPoints = 0;
+    usbBinaryBufIndex = 0;
+    usbBinaryUploadActive = true;
+    usbPathUploadActive = false;
+    Serial0.printf("USBBIN READY count=%d\n", expectedPoints);
+}
+
+void finishUsbBinaryUpload() {
+    usbBinaryUploadActive = false;
+    webPathVersion++;
+    webPathSource = "usb";
+    Serial0.printf("USBBIN OK strokes=%d raw=%d points=%d\n",
+                   webStrokeCount, usbPathRawPointCount, webPathPointCount);
+}
+
+void handleUsbBinaryUpload() {
+    while (usbBinaryUploadActive && Serial0.available()) {
+        usbBinaryBuf[usbBinaryBufIndex++] = (uint8_t)Serial0.read();
+        if (usbBinaryBufIndex < 5) {
+            continue;
+        }
+
+        uint16_t x100 = (uint16_t)usbBinaryBuf[0] | ((uint16_t)usbBinaryBuf[1] << 8);
+        uint16_t y100 = (uint16_t)usbBinaryBuf[2] | ((uint16_t)usbBinaryBuf[3] << 8);
+        bool draw = usbBinaryBuf[4] != 0;
+        if (!draw) {
+            closeUsbPathStrokeIfEmpty();
+        }
+        appendWebEncodedPoint(x100, y100, draw);
+
+        if (!draw) {
+            usbPathStrokeOpen = true;
+            usbPathStrokeHasDraw = false;
+            usbPathStrokeStartPointCount = webPathPointCount - 1;
+        } else if (usbPathStrokeOpen && !usbPathStrokeHasDraw) {
+            webStrokeCount++;
+            usbPathStrokeHasDraw = true;
+        }
+
+        usbPathRawPointCount++;
+        usbBinaryReceivedPoints++;
+        usbBinaryBufIndex = 0;
+
+        if (usbBinaryReceivedPoints >= usbBinaryExpectedPoints || webPathPointCount >= maxWebPathPoints) {
+            closeUsbPathStrokeIfEmpty();
+            finishUsbBinaryUpload();
+        }
+    }
+}
+
+void handleUsbPathUploadLine(String line) {
+    line.trim();
+    if (line.length() == 0) {
+        return;
+    }
+
+    if (line == "USBPATH END") {
+        finishUsbPathUpload();
+        return;
+    }
+
+    if (line == "USBPATH ABORT") {
+        abortUsbPathUpload();
+        return;
+    }
+
+    float x = 0.0f;
+    float y = 0.0f;
+    if (!parseUsbPathPoint(line, x, y)) {
+        Serial0.println("USBPATH ERROR bad-line");
+        return;
+    }
+
+    if (line.startsWith("S,")) {
+        closeUsbPathStrokeIfEmpty();
+        usbPathStrokeStartPointCount = webPathPointCount;
+        appendWebPoint(x, y, false);
+        usbPathStrokeOpen = true;
+        usbPathStrokeHasDraw = false;
+        usbPathPrevX = x;
+        usbPathPrevY = y;
+        usbPathRawPointCount++;
+        return;
+    }
+
+    if (line.startsWith("P,")) {
+        if (!usbPathStrokeOpen) {
+            Serial0.println("USBPATH ERROR no-stroke");
+            return;
+        }
+        int before = webPathPointCount;
+        appendWebSegmentDirect(x, y, true);
+        if (!usbPathStrokeHasDraw && webPathPointCount > before) {
+            webStrokeCount++;
+            usbPathStrokeHasDraw = true;
+        }
+        usbPathPrevX = x;
+        usbPathPrevY = y;
+        usbPathRawPointCount++;
+        if (webPathPointCount >= maxWebPathPoints) {
+            Serial0.printf("USBPATH FULL points=%d\n", webPathPointCount);
+        }
+        return;
+    }
+
+    Serial0.println("USBPATH ERROR bad-prefix");
 }
 
 void handleRootPage() {
@@ -1652,10 +2001,10 @@ void handleRicePresetUpload() {
     }
 }
 
-void handleStartPlayback() {
+bool startLoadedWebPath() {
     if (webPathPointCount < 2) {
-        webServer.send(400, "text/plain; charset=utf-8", "没有可播放轨迹");
-        return;
+        Serial0.println("No playable web path.");
+        return false;
     }
 
     allEnable(true);
@@ -1667,6 +2016,14 @@ void handleStartPlayback() {
                    webStrokeCount, webPathPointCount, webSpeedPercent, webStepDelayMs(),
                    webTravelSpeedPercent, webTravelStepDelayMs(),
                    webLoopPlayback ? 1 : 0);
+    return true;
+}
+
+void handleStartPlayback() {
+    if (!startLoadedWebPath()) {
+        webServer.send(400, "text/plain; charset=utf-8", "没有可播放轨迹");
+        return;
+    }
     webServer.send(200, "text/plain; charset=utf-8",
                    webLoopPlayback ? "开始循环绘制" : "开始单次绘制");
 }
@@ -1762,6 +2119,8 @@ void handleClearPath() {
     stopWebPlayback(true);
     webPathPointCount = 0;
     webStrokeCount = 0;
+    webPathVersion++;
+    webPathSource = "none";
     Serial0.println("Web canvas cleared.");
     webServer.send(200, "text/plain; charset=utf-8", "画布已清除");
 }
@@ -1782,6 +2141,8 @@ void handleCalibrateRequest() {
 void handleStatus() {
     String json = "{\"points\":" + String(webPathPointCount) +
                   ",\"strokes\":" + String(webStrokeCount) +
+                  ",\"pathVersion\":" + String(webPathVersion) +
+                  ",\"pathSource\":\"" + String(webPathSource) + "\"" +
                   ",\"playing\":" + String(webPlaybackActive ? "true" : "false") +
                   ",\"loop\":" + String(webLoopPlayback ? "true" : "false") +
                   ",\"speed\":" + String(webSpeedPercent) +
@@ -1797,7 +2158,52 @@ void handleStatus() {
     webServer.send(200, "application/json", json);
 }
 
+void handlePathPreview() {
+    if (!webPath || webPathPointCount < 2) {
+        webServer.send(200, "text/plain; charset=utf-8", "");
+        return;
+    }
+
+    webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    webServer.send(200, "text/plain; charset=utf-8", "");
+
+    bool lineOpen = false;
+    bool needFirstDraw = false;
+    int lastKept = -1;
+    char buf[28];
+    for (int i = 0; i < webPathPointCount; i++) {
+        WebPathPoint &p = webPath[i];
+        bool isStart = !p.draw;
+
+        snprintf(buf, sizeof(buf), "%.2f,%.2f", p.x100 * 0.01f, p.y100 * 0.01f);
+        if (isStart) {
+            if (lineOpen) {
+                webServer.sendContent("\n");
+            }
+            webServer.sendContent(buf);
+            lineOpen = true;
+            needFirstDraw = true;
+        } else {
+            if (!lineOpen) {
+                webServer.sendContent(buf);
+                lineOpen = true;
+            } else if (lastKept != i) {
+                webServer.sendContent(";");
+                webServer.sendContent(buf);
+            }
+            needFirstDraw = false;
+        }
+        lastKept = i;
+    }
+
+    if (lineOpen) {
+        webServer.sendContent("\n");
+    }
+    webServer.sendContent("");
+}
+
 void setupWebPortal() {
+    ensureWebPathBuffer();
     WiFi.persistent(false);
     WiFi.mode(WIFI_OFF);
     delay(150);
@@ -1829,6 +2235,7 @@ void setupWebPortal() {
     webServer.on("/clear", HTTP_POST, handleClearPath);
     webServer.on("/calibrate", HTTP_POST, handleCalibrateRequest);
     webServer.on("/status", HTTP_GET, handleStatus);
+    webServer.on("/pathPreview", HTTP_GET, handlePathPreview);
 
     webServer.on("/generate_204", HTTP_GET, handleRootPage);
     webServer.on("/gen_204", HTTP_GET, handleRootPage);
@@ -1916,8 +2323,8 @@ void handleWebPlayback() {
     }
 
     WebPathPoint &point = webPath[webPlaybackIndex];
-    float x = point.x10 * 0.1f;
-    float y = point.y10 * 0.1f;
+    float x = point.x100 * 0.01f;
+    float y = point.y100 * 0.01f;
 
     if (!point.draw) {
         float fromX = currentXYValid ? currentX : (L0 * 0.5f);
@@ -1987,6 +2394,50 @@ bool parseNewCommand(String s) {
         return true;
     }
 
+    if (s == "USBPATH BEGIN") {
+        beginUsbPathUpload();
+        return true;
+    }
+
+    if (s.startsWith("USBBIN ")) {
+        int expectedPoints = s.substring(7).toInt();
+        beginUsbBinaryUpload(expectedPoints);
+        return true;
+    }
+
+    if (s == "webstart" || s == "pathstart") {
+        startLoadedWebPath();
+        return true;
+    }
+
+    if (s == "webstop" || s == "pathstop") {
+        stopWebPlayback(true);
+        return true;
+    }
+
+    if (s == "usbstatus" || s == "webstatus") {
+        Serial0.printf("USBSTATUS strokes=%d points=%d playing=%d loop=%d source=%s version=%lu\n",
+                       webStrokeCount,
+                       webPathPointCount,
+                       webPlaybackActive ? 1 : 0,
+                       webLoopPlayback ? 1 : 0,
+                       webPathSource,
+                       (unsigned long)webPathVersion);
+        return true;
+    }
+
+    if (s == "loopon") {
+        webLoopPlayback = true;
+        Serial0.println("USBSTATUS loop=1");
+        return true;
+    }
+
+    if (s == "loopoff") {
+        webLoopPlayback = false;
+        Serial0.println("USBSTATUS loop=0");
+        return true;
+    }
+
     if (s == "reboot") {
         Serial0.println("Restarting...");
         delay(100);
@@ -2009,8 +2460,21 @@ bool parseNewCommand(String s) {
 }
 
 // ------------------- 初始化 -------------------
+void emitUsbReadyHeartbeat() {
+    static unsigned long lastMs = 0;
+    static uint8_t count = 0;
+    unsigned long now = millis();
+    if (count >= 20 || now - lastMs < 1000) {
+        return;
+    }
+    lastMs = now;
+    count++;
+    Serial0.printf("USBREADY baud=460800 strokes=%d points=%d\n", webStrokeCount, webPathPointCount);
+}
+
 void setup() {
-    Serial0.begin(115200);
+    Serial0.setRxBufferSize(8192);
+    Serial0.begin(460800, SERIAL_8N1, 44, 43);
     uart2.begin(115200, SERIAL_8N1, UART2_RX, UART2_TX);
     delay(100);
     Serial0.println("===== 全功能电机调试器 =====");
@@ -2028,6 +2492,12 @@ void loop() {
     handleWebPortal();
     handleWebCalibration();
     handleWebPlayback();
+    emitUsbReadyHeartbeat();
+
+    if (usbBinaryUploadActive) {
+        handleUsbBinaryUpload();
+        return;
+    }
 
     while (Serial0.available()) {
         char ch = (char)Serial0.read();
@@ -2045,7 +2515,9 @@ void loop() {
                 continue;
             }
 
-            if (!parseNewCommand(str)) {
+            if (usbPathUploadActive) {
+                handleUsbPathUploadLine(str);
+            } else if (!parseNewCommand(str)) {
                 parse_command(str);
             }
             continue;
