@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
-import subprocess
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -1207,23 +1207,25 @@ class TrajectoryStudio(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def open_usb_debug_web(self) -> None:
-        candidates = [
-            Path(__file__).with_name("usb_debug_server.py"),
-            Path.cwd() / "tools" / "usb_debug_server.py",
-            Path(sys.executable).resolve().parent / "tools" / "usb_debug_server.py",
-            Path(sys.executable).resolve().parent.parent / "tools" / "usb_debug_server.py",
-        ]
-        script = next((path for path in candidates if path.exists()), candidates[0])
+    def run_usb_debug_server_thread(self) -> None:
         try:
-            subprocess.Popen(
-                [sys.executable, str(script)],
-                cwd=str(script.resolve().parents[1]),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            import usb_debug_server  # type: ignore
+
+            usb_debug_server.run(open_browser=True)
             self.status.set("USB调试网页已启动: http://127.0.0.1:8765/")
+        except OSError as exc:
+            text = str(exc)
+            if "10048" in text or "Address already in use" in text or "address already in use" in text:
+                webbrowser.open("http://127.0.0.1:8765/")
+                self.after(0, lambda: self.status.set("USB debug web: http://127.0.0.1:8765/"))
+            else:
+                self.after(0, lambda exc=exc: messagebox.showerror("启动失败", str(exc)))
         except Exception as exc:
             messagebox.showerror("启动失败", str(exc))
+
+    def open_usb_debug_web(self) -> None:
+        threading.Thread(target=self.run_usb_debug_server_thread, daemon=True).start()
+        self.status.set("USB调试网页已启动: http://127.0.0.1:8765/")
 
     def upload_to_usb(self) -> None:
         if not self.ensure_result():

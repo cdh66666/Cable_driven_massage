@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import struct
+import sys
 import threading
 import time
 import webbrowser
@@ -26,6 +27,19 @@ SERIAL_BOOT_WAIT = 3.0
 _serial_lock = threading.Lock()
 _serial_conn: serial.Serial | None = None
 _serial_port = ""
+
+
+def find_web_html() -> Path | None:
+    candidates = [
+        Path(__file__).with_name("usb_debug_web.html"),
+        Path.cwd() / "tools" / "usb_debug_web.html",
+        Path(sys.executable).resolve().parent / "tools" / "usb_debug_web.html",
+        Path(sys.executable).resolve().parent.parent / "tools" / "usb_debug_web.html",
+    ]
+    bundle_dir = getattr(sys, "_MEIPASS", "")
+    if bundle_dir:
+        candidates.append(Path(bundle_dir) / "tools" / "usb_debug_web.html")
+    return next((path for path in candidates if path.exists()), None)
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -325,8 +339,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/":
-            html_path = Path(__file__).with_name("usb_debug_web.html")
-            body = html_path.read_bytes() if html_path.exists() else INDEX_HTML.encode("utf-8")
+            html_path = find_web_html()
+            body = html_path.read_bytes() if html_path else INDEX_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

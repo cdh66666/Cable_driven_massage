@@ -88,6 +88,38 @@ void enable_motor(uint8_t addr, bool en) {
     Serial0.printf("电机%d → 使能:%d\n", addr, en);
 }
 
+void set_motor_id(uint8_t oldAddr, uint8_t newAddr) {
+    if (oldAddr == 0 || newAddr == 0) {
+        Serial0.println("SETID ERROR id must be 1..255");
+        return;
+    }
+    if (oldAddr == newAddr) {
+        Serial0.println("SETID ERROR old id equals new id");
+        return;
+    }
+
+    while (uart2.available()) uart2.read();
+    // EMM_V5: addr + AE + 4B + saveFlag + newId + 6B.
+    const uint8_t cmd[] = {0xAE, 0x4B, 0x01, newAddr};
+    send_single(oldAddr, cmd, sizeof(cmd));
+
+    uint8_t resp[8];
+    int len = 0;
+    uint32_t start = millis();
+    while (millis() - start < 300 && len < 8) {
+        if (uart2.available()) resp[len++] = uart2.read();
+    }
+
+    if (len >= 4 && resp[0] == oldAddr && resp[1] == 0xAE && resp[2] == 0x02) {
+        Serial0.printf("SETID OK old=%u new=%u saved=1\n", oldAddr, newAddr);
+    } else if (len >= 4) {
+        Serial0.printf("SETID SENT old=%u new=%u saved=1 resp=%02X %02X %02X %02X\n",
+                       oldAddr, newAddr, resp[0], resp[1], resp[2], resp[3]);
+    } else {
+        Serial0.printf("SETID SENT old=%u new=%u saved=1 no-response\n", oldAddr, newAddr);
+    }
+}
+
 // 读位置
 float get_pos(uint8_t addr) {
     while (uart2.available()) uart2.read();
@@ -232,6 +264,10 @@ void show_help() {
     Serial0.println("square / eight / spiral / shapes  draw extra smooth test shapes");
     Serial0.println("ricepreset  load built-in 10000-point rice preset without moving");
     Serial0.println("wifi  drawing portal: SSID MassageDraw, no password");
+    Serial0.println("speed N / travelspeed N  set saved USB draw/travel speed, range 1..100");
+    Serial0.println("caltorque BASE PULL  set saved calibration hold/pull torque, mA");
+    Serial0.println("clearpath  clear uploaded path; calibrate  start coefficient calibration");
+    Serial0.println("setid OLD NEW  change one motor ID and save it, range 1..255");
     Serial0.println("reboot  restart board and reload saved calibration");
     Serial0.println("==============================\n");
 }
@@ -2394,6 +2430,109 @@ bool parseNewCommand(String s) {
         return true;
     }
 
+    if (s == "clearpath" || s == "webclear") {
+        stopWebPlayback(true);
+        webPathPointCount = 0;
+        webStrokeCount = 0;
+        webPathVersion++;
+        webPathSource = "none";
+        Serial0.printf("USBSTATUS path=cleared strokes=%d points=%d version=%lu\n",
+                       webStrokeCount, webPathPointCount, (unsigned long)webPathVersion);
+        return true;
+    }
+
+    if (s == "calibrate" || s == "webcalibrate") {
+        if (webCalibrationRunning || webCalibrationRequested) {
+            Serial0.println("USBSTATUS calibration=busy");
+            return true;
+        }
+        stopWebPlayback(true);
+        webCalibrationRequested = true;
+        webCalibrationDone = false;
+        Serial0.println("USBSTATUS calibration=requested");
+        return true;
+    }
+
+    if (s == "resetsettings") {
+        stopWebPlayback(true);
+        resetCalibrationToDefaults();
+        webSpeedPercent = 50;
+        webTravelSpeedPercent = 15;
+        calibrationBaseCurrent = defaultCalibrationBaseCurrent;
+        calibrationPullCurrent = defaultCalibrationPullCurrent;
+        saveCalibration();
+        saveWebSettings();
+        Serial0.println("USBSTATUS settings=reset");
+        return true;
+    }
+
+    if (s.startsWith("speed ")) {
+        int value = constrain(s.substring(6).toInt(), 1, 100);
+        webSpeedPercent = (uint8_t)value;
+        saveWebSettings();
+        Serial0.printf("USBSTATUS speed=%u delay=%u\n", webSpeedPercent, webStepDelayMs());
+        return true;
+    }
+
+    if (s.startsWith("travelspeed ")) {
+        int value = constrain(s.substring(12).toInt(), 1, 100);
+        webTravelSpeedPercent = (uint8_t)value;
+        saveWebSettings();
+        Serial0.printf("USBSTATUS travelSpeed=%u delay=%u\n",
+                       webTravelSpeedPercent, webTravelStepDelayMs());
+        return true;
+    }
+
+    if (s.startsWith("caltorque ")) {
+        int base = 0;
+        int pull = 0;
+        if (sscanf(s.c_str(), "caltorque %d %d", &base, &pull) != 2) {
+            Serial0.println("USBSTATUS calTorque=bad-args");
+            return true;
+        }
+        calibrationBaseCurrent = constrain(base, 20, 300);
+        calibrationPullCurrent = constrain(pull, 300, 1500);
+        saveWebSettings();
+        Serial0.printf("USBSTATUS calBase=%d calPull=%d\n",
+                       calibrationBaseCurrent, calibrationPullCurrent);
+        return true;
+    }
+
+    if (s.startsWith("setid ")) {
+        int oldId = 0;
+        int newId = 0;
+        if (sscanf(s.c_str(), "setid %d %d", &oldId, &newId) != 2 ||
+            oldId < 1 || oldId > 255 || newId < 1 || newId > 255) {
+            Serial0.println("SETID ERROR usage: setid OLD NEW, range 1..255");
+            return true;
+        }
+        set_motor_id((uint8_t)oldId, (uint8_t)newId);
+        return true;
+    }
+
+    if (s == "allpos") {
+        getAllPos();
+        return true;
+    }
+
+    if (s == "allenable" || s == "alle") {
+        allEnable(true);
+        Serial0.println("USBSTATUS allEnable=1");
+        return true;
+    }
+
+    if (s == "alldisable" || s == "alld") {
+        allEnable(false);
+        Serial0.println("USBSTATUS allEnable=0");
+        return true;
+    }
+
+    if (s == "allzero" || s == "allclearpos") {
+        allClearPos();
+        Serial0.println("USBSTATUS allZero=1");
+        return true;
+    }
+
     if (s == "USBPATH BEGIN") {
         beginUsbPathUpload();
         return true;
@@ -2412,17 +2551,26 @@ bool parseNewCommand(String s) {
 
     if (s == "webstop" || s == "pathstop") {
         stopWebPlayback(true);
+        Serial0.println("USBSTATUS stopped=1");
         return true;
     }
 
     if (s == "usbstatus" || s == "webstatus") {
-        Serial0.printf("USBSTATUS strokes=%d points=%d playing=%d loop=%d source=%s version=%lu\n",
+        Serial0.printf("USBSTATUS strokes=%d points=%d playing=%d loop=%d source=%s version=%lu speed=%u travel=%u calBase=%d calPull=%d m1=%.3f m2=%.3f m3=%.3f m4=%.3f\n",
                        webStrokeCount,
                        webPathPointCount,
                        webPlaybackActive ? 1 : 0,
                        webLoopPlayback ? 1 : 0,
                        webPathSource,
-                       (unsigned long)webPathVersion);
+                       (unsigned long)webPathVersion,
+                       webSpeedPercent,
+                       webTravelSpeedPercent,
+                       calibrationBaseCurrent,
+                       calibrationPullCurrent,
+                       realDeg2mm[1],
+                       realDeg2mm[2],
+                       realDeg2mm[3],
+                       realDeg2mm[4]);
         return true;
     }
 
