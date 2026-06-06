@@ -22,6 +22,7 @@ BAUD = 460800
 CANVAS_MM = 150.0
 MAX_POINTS = 200000
 SERIAL_BOOT_WAIT = 3.0
+UPLOAD_CHUNK_BYTES = 32768
 
 
 _serial_lock = threading.Lock()
@@ -39,6 +40,19 @@ def find_web_html() -> Path | None:
     bundle_dir = getattr(sys, "_MEIPASS", "")
     if bundle_dir:
         candidates.append(Path(bundle_dir) / "tools" / "usb_debug_web.html")
+    return next((path for path in candidates if path.exists()), None)
+
+
+def find_air_html() -> Path | None:
+    candidates = [
+        Path(__file__).with_name("air_pressure_test.html"),
+        Path.cwd() / "tools" / "air_pressure_test.html",
+        Path(sys.executable).resolve().parent / "tools" / "air_pressure_test.html",
+        Path(sys.executable).resolve().parent.parent / "tools" / "air_pressure_test.html",
+    ]
+    bundle_dir = getattr(sys, "_MEIPASS", "")
+    if bundle_dir:
+        candidates.append(Path(bundle_dir) / "tools" / "air_pressure_test.html")
     return next((path for path in candidates if path.exists()), None)
 
 
@@ -223,7 +237,7 @@ def get_serial(port: str) -> serial.Serial:
 
     close_serial()
     print(f"Opening serial {port}...", flush=True)
-    ser = serial.Serial(port, BAUD, timeout=0.25, write_timeout=0, rtscts=False, dsrdtr=False)
+    ser = serial.Serial(port, BAUD, timeout=0.25, write_timeout=2.0, rtscts=False, dsrdtr=False)
     ser.dtr = False
     ser.rts = False
     _serial_conn = ser
@@ -235,6 +249,42 @@ def get_serial(port: str) -> serial.Serial:
     ser.reset_input_buffer()
     print(f"Serial {port} ready.", flush=True)
     return ser
+
+
+def write_all(ser: serial.Serial, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = ser.write(data[offset:])
+        if written is None:
+            written = len(data) - offset
+        if written <= 0:
+            raise serial.SerialTimeoutException("serial write returned 0 bytes")
+        offset += written
+    ser.flush()
+
+
+def reset_input_buffer_safe(ser: serial.Serial) -> None:
+    try:
+        ser.reset_input_buffer()
+    except (OSError, PermissionError, serial.SerialException):
+        # Let the caller's write retry reopen the port.
+        raise
+
+
+def prepare_and_write_line(port: str, line: str) -> serial.Serial:
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            ser = get_serial(port)
+            reset_input_buffer_safe(ser)
+            write_all(ser, (line.strip() + "\n").encode("ascii"))
+            return ser
+        except (OSError, PermissionError, serial.SerialException) as exc:
+            last_error = exc
+            print(f"Serial write failed on {port}, retry {attempt + 1}/2: {exc}", flush=True)
+            close_serial()
+            time.sleep(0.8)
+    raise RuntimeError(f"串口写入失败，请关闭 VSCode Monitor/PlatformIO 串口监视器后重试: {last_error}")
 
 
 def flatten_strokes(strokes: list[list[dict[str, float]]]) -> bytes:
@@ -257,9 +307,7 @@ def flatten_strokes(strokes: list[list[dict[str, float]]]) -> bytes:
 
 def send_command(port: str, command: str, wait_prefixes: tuple[str, ...], timeout: float = 5.0) -> str:
     with _serial_lock:
-        ser = get_serial(port)
-        ser.reset_input_buffer()
-        ser.write((command.strip() + "\n").encode("ascii"))
+        ser = prepare_and_write_line(port, command)
         lines: list[str] = []
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -271,7 +319,7 @@ def send_command(port: str, command: str, wait_prefixes: tuple[str, ...], timeou
                 continue
             lines.append(text)
             if text.startswith(wait_prefixes):
-                return text
+                return "\n".join(lines)
         return "\n".join(lines[-8:]) or "未收到板子回复"
 
 
@@ -279,44 +327,50 @@ def upload_binary(port: str, strokes: list[list[dict[str, float]]]) -> str:
     payload = flatten_strokes(strokes)
     count = len(payload) // 5
     with _serial_lock:
-        ser = get_serial(port)
-        ser.reset_input_buffer()
-        print(f"Uploading {count} binary points...", flush=True)
-        ser.write(f"USBBIN {count}\n".encode("ascii"))
-        ready = ""
-        end = time.monotonic() + 5.0
-        while time.monotonic() < end:
-            raw = ser.readline()
-            if not raw:
-                continue
-            text = raw.decode("utf-8", errors="replace").strip()
-            if text.startswith("USBBIN READY"):
-                ready = text
-                break
-            if text.startswith("USBBIN ERROR"):
-                raise RuntimeError(text)
-        if not ready:
-            raise RuntimeError("板子没有进入二进制接收模式")
-        chunk = 4096
-        for start in range(0, len(payload), chunk):
-            ser.write(payload[start : start + chunk])
-            time.sleep(0.002)
-        print("Payload sent, waiting for board ack...", flush=True)
-        end = time.monotonic() + 12.0
-        lines: list[str] = []
-        while time.monotonic() < end:
-            raw = ser.readline()
-            if not raw:
-                continue
-            text = raw.decode("utf-8", errors="replace").strip()
-            if not text:
-                continue
-            lines.append(text)
-            if text.startswith("USBBIN OK"):
-                return text
-            if text.startswith("USBBIN ERROR"):
-                raise RuntimeError(text)
-        raise RuntimeError("\n".join(lines[-8:]) or "上传后未收到确认")
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                ser = prepare_and_write_line(port, f"USBBIN {count}")
+                print(f"Uploading {count} binary points...", flush=True)
+                ready = ""
+                end = time.monotonic() + 5.0
+                while time.monotonic() < end:
+                    raw = ser.readline()
+                    if not raw:
+                        continue
+                    text = raw.decode("utf-8", errors="replace").strip()
+                    if text.startswith("USBBIN READY"):
+                        ready = text
+                        break
+                    if text.startswith("USBBIN ERROR"):
+                        raise RuntimeError(text)
+                if not ready:
+                    raise RuntimeError("板子没有进入二进制接收模式")
+                chunk = UPLOAD_CHUNK_BYTES
+                for start in range(0, len(payload), chunk):
+                    write_all(ser, payload[start : start + chunk])
+                print("Payload sent, waiting for board ack...", flush=True)
+                end = time.monotonic() + 12.0
+                lines: list[str] = []
+                while time.monotonic() < end:
+                    raw = ser.readline()
+                    if not raw:
+                        continue
+                    text = raw.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    lines.append(text)
+                    if text.startswith("USBBIN OK"):
+                        return text
+                    if text.startswith("USBBIN ERROR"):
+                        raise RuntimeError(text)
+                raise RuntimeError("\n".join(lines[-8:]) or "上传后未收到确认")
+            except (OSError, PermissionError, serial.SerialException) as exc:
+                last_error = exc
+                print(f"Binary upload write failed, retry {attempt + 1}/2: {exc}", flush=True)
+                close_serial()
+                time.sleep(0.8)
+        raise RuntimeError(f"上传失败，请关闭其它串口窗口后重试: {last_error}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -348,6 +402,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/air":
+            html_path = find_air_html()
+            if html_path is None:
+                self.send_error(404)
+                return
+            body = html_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/ports":
             self.send_json({"ports": available_ports()})
             return
@@ -363,18 +430,46 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/command":
                 cmd = str(data["command"])
-                prefixes = ("USBSTATUS", "Web playback", "Web single", "Web playback stopped", "No playable", "USBSTATUS loop")
-                msg = send_command(str(data["port"]), cmd, prefixes)
+                raw_prefixes = data.get("prefixes")
+                if isinstance(raw_prefixes, list) and raw_prefixes:
+                    prefixes = tuple(str(prefix) for prefix in raw_prefixes)
+                else:
+                    prefixes = (
+                        "USBSTATUS",
+                        "AIRSTATUS",
+                        "AIRREAD",
+                        "AIRADC",
+                        "AIRBUS",
+                        "AIRZERO",
+                        "AIRPROBE",
+                        "AIRPULSE",
+                        "AIRTEST",
+                        "AIRAUTOID",
+                        "AIR ",
+                        "Web playback",
+                        "Web single",
+                        "Web playback stopped",
+                        "No playable",
+                        "USBSTATUS loop",
+                    )
+                timeout = max(0.2, min(float(data.get("timeout", 5.0)), 60.0))
+                msg = send_command(str(data["port"]), cmd, prefixes, timeout)
                 self.send_json({"ok": True, "message": msg})
+                return
+            if path == "/api/close":
+                close_serial()
+                self.send_json({"ok": True, "message": "serial closed"})
                 return
             self.send_error(404)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
 
 
-def run(open_browser: bool = True) -> None:
+def run(open_browser: bool = True, page: str = "/") -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    url = f"http://{HOST}:{PORT}/"
+    if not page.startswith("/"):
+        page = "/" + page
+    url = f"http://{HOST}:{PORT}{page}"
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     print(f"USB debug web server: {url}")
@@ -382,4 +477,5 @@ def run(open_browser: bool = True) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    page = "/air" if "--air" in sys.argv else "/"
+    run(open_browser="--no-browser" not in sys.argv, page=page)

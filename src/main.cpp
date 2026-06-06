@@ -11,11 +11,12 @@ HardwareSerial debugSerial(0);
 #define Serial0 debugSerial
 
 // PlatformIO 的 ESP32 Arduino core 使用 Serial 作为默认调试串口。
-// 硬件状态：四个电机共同拉着一个小球，电机分布在左下、左上、右上、右下；
-// 对应 (x,y) 坐标为 (0,0), (0,15cm), (15cm,15cm), (15cm,0)。
+// 硬件状态：四个电机共同拉着一个小球，电机分布在左上、右上、右下、左下；
+// 对应 (x,y) 坐标为 M1(0,15cm), M2(15cm,15cm), M3(15cm,0), M4(0,0)。
 
 // PlatformIO/C++ 不会像 Arduino IDE 一样自动生成函数声明。
 void readAllMotorAngle();
+void readAllMotorCurrent(bool verbose = true);
 void calcRealCoefficient();
 void loadCalibration();
 void saveCalibration();
@@ -28,6 +29,13 @@ void drawShapeTests();
 void setupWebPortal();
 void handleWebPortal();
 void handleWebPlayback();
+bool isWebPlaybackActive();
+void setupAirControl();
+void handleAirControl();
+void loadAirSettings();
+void saveAirSettings();
+void clampAirTuneParams();
+void printAirTuneParams();
 
 // ------------------- 硬件配置 -------------------
 #define UART2_TX 17
@@ -140,9 +148,32 @@ float get_pos(uint8_t addr) {
     return 0.0f;
 }
 
-// 角度控制（修复负角度疯狂转圈问题）
-const uint16_t moveMaxCurrent = 2000;
-const int moveSpeedDps = 2000;
+bool read_phase_current(uint8_t addr, int &currentMa) {
+    currentMa = -1;
+    while (uart2.available()) uart2.read();
+    const uint8_t cmd[] = {0x27};
+    send_single(addr, cmd, sizeof(cmd));
+
+    uint8_t buf[8];
+    int len = 0;
+    uint32_t start = millis();
+    while (millis() - start < 45 && len < 8) {
+        if (uart2.available()) buf[len++] = uart2.read();
+    }
+
+    if (len >= 5 && buf[0] == addr && buf[1] == 0x27 && buf[4] == 0x6B) {
+        currentMa = ((uint16_t)buf[2] << 8) | buf[3];
+        return true;
+    }
+    return false;
+}
+
+// 位置控制电流上限。轨迹绘制时会用这个值限制电机拉力，网页端可调并保存。
+const uint16_t defaultMotionCurrentMa = 1000;
+const uint16_t minMotionCurrentMa = 300;
+const uint16_t maxMotionCurrentMa = 2200;
+uint16_t motionCurrentMa = defaultMotionCurrentMa;
+const int moveSpeedDps = 1000;
 
 size_t appendMoveCommand(uint8_t *buf, size_t idx, uint8_t addr, float angle) {
     uint8_t dir = (angle < 0) ? 0x01 : 0x00;
@@ -160,8 +191,8 @@ size_t appendMoveCommand(uint8_t *buf, size_t idx, uint8_t addr, float angle) {
     buf[idx++] = pos_val & 0xFF;
     buf[idx++] = 0x01;
     buf[idx++] = 0x00;
-    buf[idx++] = (moveMaxCurrent >> 8) & 0xFF;
-    buf[idx++] = moveMaxCurrent & 0xFF;
+    buf[idx++] = (motionCurrentMa >> 8) & 0xFF;
+    buf[idx++] = motionCurrentMa & 0xFF;
     buf[idx++] = 0x6B;
 
     return idx;
@@ -220,10 +251,41 @@ void calibrate_encoder(uint8_t addr) {
 }
 
 // 全体电机统一执行函数
+float motorTensionTrimMm[5] = {0, 0, 0, 0, 0};
+bool cableCurrentFeedbackEnabled = true;
+const float defaultMaxMotorTensionTrimMm = 3.0f;
+const float defaultCableTensionTrimUpMm = 0.12f;
+const float defaultCableTensionTrimDownMm = 0.04f;
+const int defaultCableLowCurrentMa = 18;
+const int defaultCableHighCurrentMa = 125;
+const uint8_t defaultCableFeedbackMoveInterval = 12;
+float maxMotorTensionTrimMm = defaultMaxMotorTensionTrimMm;
+float cableTensionTrimUpMm = defaultCableTensionTrimUpMm;
+float cableTensionTrimDownMm = defaultCableTensionTrimDownMm;
+int cableLowCurrentMa = defaultCableLowCurrentMa;
+int cableHighCurrentMa = defaultCableHighCurrentMa;
+uint8_t cableFeedbackMoveInterval = defaultCableFeedbackMoveInterval;
+uint16_t cableMoveCounter = 0;
+uint32_t lastCableFeedbackPrintMs = 0;
+uint32_t lastCableFeedbackMs = 0;
+const uint16_t cableFeedbackMinPeriodMs = 450;
+const uint16_t cablePlaybackFeedbackMinPeriodMs = 6000;
+bool cableMotorsEnabled = false;
+
 void allLockKey() { for (int i = 0; i < motorTotal; i++) lock_key(allMotorList[i]); }
 void allUnLockKey() { for (int i = 0; i < motorTotal; i++) unlock_key(allMotorList[i]); }
 void allClearPos() { for (int i = 0; i < motorTotal; i++) clear_pos(allMotorList[i]); }
-void allEnable(bool en) { for (int i = 0; i < motorTotal; i++) enable_motor(allMotorList[i], en); }
+void allEnable(bool en) {
+    for (int i = 0; i < motorTotal; i++) enable_motor(allMotorList[i], en);
+    cableMotorsEnabled = en;
+    if (!en) {
+        for (int m = 1; m <= 4; m++) {
+            motorTensionTrimMm[m] = 0.0f;
+        }
+        cableMoveCounter = 0;
+        lastCableFeedbackMs = 0;
+    }
+}
 void allCalibrate() { for (int i = 0; i < motorTotal; i++) calibrate_encoder(allMotorList[i]); }
 
 void allMove(float ang) {
@@ -248,6 +310,101 @@ void getAllPos() {
 }
 
 // ------------------- 调试指令 -------------------
+bool readMotorCurrents(int currents[5]) {
+    for (int m = 0; m < 5; m++) {
+        currents[m] = -1;
+    }
+
+    bool ok = true;
+    for (int i = 0; i < motorTotal; i++) {
+        int currentMa = -1;
+        if (!read_phase_current(allMotorList[i], currentMa)) {
+            ok = false;
+        }
+        currents[allMotorList[i]] = currentMa;
+    }
+    return ok;
+}
+
+void readAllMotorCurrent(bool verbose) {
+    int currents[5] = {-1, -1, -1, -1, -1};
+    bool ok = readMotorCurrents(currents);
+    if (verbose) {
+        Serial0.printf("MOTORCURRENT ok=%d m1=%d m2=%d m3=%d m4=%d\n",
+                       ok ? 1 : 0, currents[1], currents[2], currents[3], currents[4]);
+    }
+}
+
+void resetCableTensionFeedback() {
+    for (int m = 1; m <= 4; m++) {
+        motorTensionTrimMm[m] = 0.0f;
+    }
+    cableMoveCounter = 0;
+    lastCableFeedbackMs = 0;
+}
+
+void updateCableTensionFeedback(bool forcePrint = false) {
+    if (!cableCurrentFeedbackEnabled || !cableMotorsEnabled) {
+        return;
+    }
+
+    int currents[5] = {-1, -1, -1, -1, -1};
+    bool ok = readMotorCurrents(currents);
+    if (!ok) {
+        return;
+    }
+
+    bool changed = false;
+    for (int m = 1; m <= 4; m++) {
+        if (currents[m] < 0) {
+            continue;
+        }
+        if (currents[m] < cableLowCurrentMa) {
+            float before = motorTensionTrimMm[m];
+            motorTensionTrimMm[m] = min(maxMotorTensionTrimMm,
+                                        motorTensionTrimMm[m] + cableTensionTrimUpMm);
+            changed = changed || fabs(motorTensionTrimMm[m] - before) > 0.001f;
+        } else if (currents[m] > cableHighCurrentMa) {
+            float before = motorTensionTrimMm[m];
+            motorTensionTrimMm[m] = max(0.0f, motorTensionTrimMm[m] - cableTensionTrimDownMm);
+            changed = changed || fabs(motorTensionTrimMm[m] - before) > 0.001f;
+        }
+    }
+
+    uint32_t now = millis();
+    if (forcePrint || (changed && now - lastCableFeedbackPrintMs > 900)) {
+        lastCableFeedbackPrintMs = now;
+        Serial0.printf("TENSIONFB on=%d ok=%d cur=%d,%d,%d,%d trim=%.2f,%.2f,%.2f,%.2f low=%d high=%d\n",
+                       cableCurrentFeedbackEnabled ? 1 : 0,
+                       ok ? 1 : 0,
+                       currents[1], currents[2], currents[3], currents[4],
+                       motorTensionTrimMm[1], motorTensionTrimMm[2],
+                       motorTensionTrimMm[3], motorTensionTrimMm[4],
+                       cableLowCurrentMa, cableHighCurrentMa);
+    }
+}
+
+void printTensionFeedbackConfig() {
+    Serial0.printf("FBPARAM on=%d low=%d high=%d up=%.3f down=%.3f max=%.2f interval=%u trim=%.2f,%.2f,%.2f,%.2f\n",
+                   cableCurrentFeedbackEnabled ? 1 : 0,
+                   cableLowCurrentMa, cableHighCurrentMa,
+                   cableTensionTrimUpMm, cableTensionTrimDownMm,
+                   maxMotorTensionTrimMm, cableFeedbackMoveInterval,
+                   motorTensionTrimMm[1], motorTensionTrimMm[2],
+                   motorTensionTrimMm[3], motorTensionTrimMm[4]);
+}
+
+void resetTensionFeedbackParams() {
+    cableCurrentFeedbackEnabled = true;
+    cableLowCurrentMa = defaultCableLowCurrentMa;
+    cableHighCurrentMa = defaultCableHighCurrentMa;
+    cableTensionTrimUpMm = defaultCableTensionTrimUpMm;
+    cableTensionTrimDownMm = defaultCableTensionTrimDownMm;
+    maxMotorTensionTrimMm = defaultMaxMotorTensionTrimMm;
+    cableFeedbackMoveInterval = defaultCableFeedbackMoveInterval;
+    resetCableTensionFeedback();
+}
+
 void show_help() {
     Serial0.println("\n========== 调试指令 ==========");
     Serial0.println("M  切换模式【单电机/全体电机】");
@@ -259,15 +416,33 @@ void show_help() {
     Serial0.println("---坐标指令---");
     Serial0.println("home  四点自动校准");
     Serial0.println("goto X Y  移动到坐标，单位mm，例如 goto 75 75");
-    Serial0.println("coef  show saved/current coefficients");
+    Serial0.println("coef  show saved/current coefficients; coef set M1 M2 M3 M4  save coefficients");
     Serial0.println("circles  draw fine expanding circles around (75,75)");
     Serial0.println("square / eight / spiral / shapes  draw extra smooth test shapes");
     Serial0.println("ricepreset  load built-in 10000-point rice preset without moving");
     Serial0.println("wifi  drawing portal: SSID MassageDraw, no password");
     Serial0.println("speed N / travelspeed N  set saved USB draw/travel speed, range 1..100");
+    Serial0.println("current N  set saved motion current limit for trajectory moves, mA");
+    Serial0.println("tension MM  set saved rope take-up offset, range 0..12 mm");
     Serial0.println("caltorque BASE PULL  set saved calibration hold/pull torque, mA");
+    Serial0.println("airbus / airscan / airread / airstatus / airzero  read/zero MCP-H10 analog pressure sensor on GPIO4");
+    Serial0.println("airadc / airadcpin PIN  scan/select MCP-H10 analog input GPIO");
+    Serial0.println("airgear N / airgear N MIN MAX / airgears  select or edit three saved pressure gears");
+    Serial0.println("airrange MIN MAX  set current gear pressure range in kPa");
+    Serial0.println("airon / airoff / airinflate / airdeflate / airkeep  pressure control");
+    Serial0.println("airtest  pulse GPIO9/10/11 one by one; fixed air pins: GPIO11 inflate, GPIO9+10 deflate");
+    Serial0.println("airpulse PIN MS  raw short pulse on GPIO9/10/11, max 220ms");
+    Serial0.println("airprobe BITS MS  safe chunked combo probe, bits: 1=GPIO9 2=GPIO10 4=GPIO11");
+    Serial0.println("airbits BITS [MS] [PWM]  manual output hold, bits: 1=GPIO9 2=GPIO10 4=GPIO11, MS=0 continuous");
+    Serial0.println("airpwm PWM [MS]  manual inflate with adjustable GPIO11 pump PWM, MS=0 continuous");
+    Serial0.println("airautoid  try to identify pump/vent/hold from pressure changes");
     Serial0.println("clearpath  clear uploaded path; calibrate  start coefficient calibration");
     Serial0.println("setid OLD NEW  change one motor ID and save it, range 1..255");
+    Serial0.println("---serial lab---");
+    Serial0.println("diag  one full sample: XY, path index, motor pos/current, air pressure, trims");
+    Serial0.println("diaglog N MS  continuous samples while playback/air control keep running");
+    Serial0.println("fbparam  show cable current feedback; fbparam low|high|up|down|max|interval|on VALUE; fbparam reset");
+    Serial0.println("airparam  show air tune; airparam inflate|deflate|period|inflateSettle|deflateSettle|transient|jump|hard VALUE; airparam reset");
     Serial0.println("reboot  restart board and reload saved calibration");
     Serial0.println("==============================\n");
 }
@@ -337,26 +512,1941 @@ float ropeLength[5] = {0};
 float caliAngle[5][5] = {0};
 
 // 4个电机的真实换算系数 (°/mm)，校准后自动计算
-float realDeg2mm[5] = {0, -4.3, 4.3, -4.3, 4.3};
-const float defaultDeg2mm[5] = {0, -4.3, 4.3, -4.3, 4.3};
+float realDeg2mm[5] = {0, -3.761f, 3.775f, -3.742f, 3.796f};
+const float defaultDeg2mm[5] = {0, -3.761f, 3.775f, -3.742f, 3.796f};
 const int8_t motorAngleSign[5] = {0, -1, 1, -1, 1};
 const char *calibrationNamespace = "motorcal";
 const uint32_t calibrationMagic = 0x43414C31; // "CAL1"
-const float calibrationCoeffMinAbs = 4.00f;
-const float calibrationCoeffMaxAbs = 4.70f;
-const float calibrationCoeffMaxSpread = 0.15f;
+const float calibrationCoeffMinAbs = 2.50f;
+const float calibrationCoeffMaxAbs = 8.00f;
+const float calibrationCoeffMaxSpread = 0.75f;
 
 // 理论系数（校准后会被实测值覆盖）
 const float deg2mm_theory = 3.14159f * 13.5f / 360.0f;
 
-// 4个校准点坐标
-const float caliX[5] = {0, 0, 0, 150, 150};
-const float caliY[5] = {0, 0, 150, 150, 0};
+// 4个校准点坐标：M1左上、M2右上、M3右下、M4左下。
+const float caliX[5] = {0, 0, 150, 150, 0};
+const float caliY[5] = {0, 150, 150, 0, 0};
 const int defaultCalibrationBaseCurrent = 80;
 const int defaultCalibrationPullCurrent = 900;
 int calibrationBaseCurrent = defaultCalibrationBaseCurrent;
 int calibrationPullCurrent = defaultCalibrationPullCurrent;
 const uint16_t calibrationPullMs = 3500;
+const float defaultRopeTensionOffsetMm = 7.5f;
+const float maxRopeTensionOffsetMm = 12.0f;
+float ropeTensionOffsetMm = defaultRopeTensionOffsetMm;
+
+// ------------------- Air pressure control -------------------
+const int airCandidatePins[3] = {9, 10, 11};
+const int airAnalogCandidatePins[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+const bool airUseAnalogH10Sensor = true;
+int airAnalogPin = 4;
+const float xgzp6847C05KppKpaPerVolt = 4.0f; // XGZP6847A -5..5kPa, 3.3V: 0.2V->-5kPa, 2.7V->+5kPa.
+const float defaultAirZeroVoltage = 1.450f;  // 0kPa midpoint for the -5..5kPa 3.3V variant.
+const uint16_t defaultAirAutoInflatePulseMs = 3200;
+const uint16_t defaultAirAutoDeflatePulseMs = 420;
+const uint16_t defaultAirManualInflatePulseMs = 45;
+const uint16_t defaultAirManualDeflatePulseMs = 160;
+const uint16_t defaultAirAutoDeflatePulseMaxMs = 1800;
+const uint16_t defaultAirControlPeriodMs = 10;
+uint16_t airAutoInflatePulseMs = defaultAirAutoInflatePulseMs;
+uint16_t airAutoDeflatePulseMs = defaultAirAutoDeflatePulseMs;
+uint16_t airManualInflatePulseMs = defaultAirManualInflatePulseMs;
+uint16_t airManualDeflatePulseMs = defaultAirManualDeflatePulseMs;
+uint16_t airAutoDeflatePulseMaxMs = defaultAirAutoDeflatePulseMaxMs;
+uint16_t airControlPeriodMs = defaultAirControlPeriodMs;
+const uint16_t airDetectPulseMs = 120;
+const uint16_t airDetectPulseMs2 = 220;
+const uint16_t airRawPulseMaxMs = 220;
+const uint16_t airProbeChunkMs = 100;
+const uint16_t airProbeMaxMs = 3000;
+const uint16_t airManualBitsMaxMs = 5000;
+const uint16_t airManualWatchMs = 100;
+const uint16_t defaultAirInflateSettleMs = 1300;
+const uint16_t defaultAirDeflateSettleMs = 650;
+const uint16_t defaultAirTransientRejectMs = 1800;
+const float defaultAirJumpRejectKpa = 0.85f;
+const uint16_t airHardConfirmMs = 450;
+const float airHardImmediateMarginKpa = 0.45f;
+const uint16_t airPidWindowMs = 320;
+const uint16_t airPidMaxInflateOnMs = 4200;
+const uint16_t airPidSensorQuietMs = 900;
+const uint8_t airPumpPwmChannel = 7;
+const uint32_t airPumpPwmFreq = 18000;
+const uint8_t airPumpPwmBits = 8;
+const uint8_t airPumpPwmMinDuty = 72;
+const uint8_t airPumpPwmMaxDuty = 255;
+const uint16_t airValveMinOpenMs = 260;
+const uint16_t airValveMinClosedMs = 900;
+const float airValveOpenErrorKpa = 0.18f;
+const float airValveCloseErrorKpa = 0.04f;
+const float defaultAirPidKp = 1.85f;
+const float defaultAirPidKi = 0.08f;
+const float defaultAirPidKd = 0.00f;
+const float defaultAirInflateRateKpaPerSec = 0.11f;
+const float defaultAirDeflateRateKpaPerSec = 1.80f;
+uint16_t airInflateSettleMs = defaultAirInflateSettleMs;
+uint16_t airDeflateSettleMs = defaultAirDeflateSettleMs;
+uint16_t airTransientRejectMs = defaultAirTransientRejectMs;
+float airJumpRejectKpa = defaultAirJumpRejectKpa;
+float airPidKp = defaultAirPidKp;
+float airPidKi = defaultAirPidKi;
+float airPidKd = defaultAirPidKd;
+float airInflateRateKpaPerSec = defaultAirInflateRateKpaPerSec;
+float airDeflateRateKpaPerSec = defaultAirDeflateRateKpaPerSec;
+const float airIdentifyAbortKpa = 1.2f;
+const float airIdentifyMinRiseKpa = 0.012f;
+const uint8_t mcpH11DefaultAddress = 0x36; // PDF A7..A1 = 0110110; wire bytes are 0x6C/0x6D.
+const uint8_t mcpH11StatusReg = 0xD0;
+const uint8_t mcpH11PressureReg = 0xD1;    // PDATA[23:0] lives in 0xD1..0xD3.
+const float mcpH11PressureDen = 8388607.0f;
+const float mcpH11B10KppA = 12.5f;         // MCP-H11-B10KPP: P = A * PCode / 8388607 + B.
+const float mcpH11B10KppB = -1.25f;
+const float defaultAirMinKpa = 2.8f;
+const float defaultAirMaxKpa = 3.4f;
+const float defaultAirHardLimitKpa = 5.0f;
+float airHardLimitKpa = defaultAirHardLimitKpa;
+const uint8_t airGearCount = 3;
+const float defaultAirGearMin[airGearCount] = {2.40f, 3.20f, 3.70f};
+const float defaultAirGearMax[airGearCount] = {2.85f, 3.50f, 3.95f};
+
+int airPumpPin = 11;
+int airVentPin = 9;
+int airHoldPin = 10; // Used as auxiliary fast-vent for the current air-cushion hardware.
+int airSdaPin = 4;
+int airSclPin = 5;
+uint8_t airSensorAddress = mcpH11DefaultAddress;
+bool airPinMapConfirmed = true;
+float airMinKpa = defaultAirMinKpa;
+float airMaxKpa = defaultAirMaxKpa;
+bool airControlEnabled = false;
+bool airSensorOnline = false;
+float airPressureKpa = NAN;
+float airFilteredKpa = NAN;
+float airStableKpa = NAN;
+float airTemperatureC = NAN;
+float airSensorVoltage = NAN;
+float airZeroVoltage = defaultAirZeroVoltage;
+float airGearMin[airGearCount] = {defaultAirGearMin[0], defaultAirGearMin[1], defaultAirGearMin[2]};
+float airGearMax[airGearCount] = {defaultAirGearMax[0], defaultAirGearMax[1], defaultAirGearMax[2]};
+uint8_t airSelectedGear = 2;
+char airMode[16] = "idle";
+uint32_t lastAirControlMs = 0;
+uint32_t lastAirPrintMs = 0;
+uint32_t airSettleUntilMs = 0;
+uint32_t lastAirActuationMs = 0;
+uint32_t airAutoActionStartMs = 0;
+uint32_t airAutoPauseUntilMs = 0;
+uint8_t airAutoActionBits = 0;
+uint32_t airHardOverStartMs = 0;
+uint32_t lastAirValveStopMs = 0;
+uint8_t airPumpDutyCommand = 0;
+uint8_t airManualPumpDutyCommand = airPumpPwmMaxDuty;
+float airPidEstimateKpa = NAN;
+float airPidIntegral = 0.0f;
+float airPidLastError = 0.0f;
+float airPidOutput = 0.0f;
+uint32_t lastAirPidEstimateMs = 0;
+uint32_t airPidWindowStartMs = 0;
+uint8_t airManualBits = 0;
+uint32_t airManualUntilMs = 0;
+uint32_t lastAirManualWatchMs = 0;
+
+struct AirReading {
+    bool ok;
+    float pressureKpa;
+    float temperatureC;
+    int32_t rawPressure;
+    int16_t rawTemperature;
+    float voltage;
+};
+
+int32_t signExtend24(uint32_t value) {
+    if (value & 0x800000UL) {
+        return (int32_t)(value | 0xFF000000UL);
+    }
+    return (int32_t)value;
+}
+
+int16_t signExtend16(uint16_t value) {
+    return (int16_t)value;
+}
+
+bool airPinsAreUnique() {
+    return airPumpPin != airVentPin && airPumpPin != airHoldPin && airVentPin != airHoldPin;
+}
+
+void useFixedAirPins() {
+    airPumpPin = 11;
+    airVentPin = 9;
+    airHoldPin = 10;
+    airPinMapConfirmed = true;
+}
+
+void setupAirPins() {
+    useFixedAirPins();
+    pinMode(airPumpPin, OUTPUT);
+    ledcSetup(airPumpPwmChannel, airPumpPwmFreq, airPumpPwmBits);
+    ledcAttachPin(airPumpPin, airPumpPwmChannel);
+    ledcWrite(airPumpPwmChannel, 0);
+    airPumpDutyCommand = 0;
+    pinMode(airVentPin, OUTPUT);
+    pinMode(airHoldPin, OUTPUT);
+    digitalWrite(airVentPin, LOW);
+    digitalWrite(airHoldPin, LOW);
+    strlcpy(airMode, "off", sizeof(airMode));
+}
+
+void releaseI2cPinWithPullup(int pin) {
+    digitalWrite(pin, HIGH);
+    pinMode(pin, INPUT_PULLUP);
+}
+
+void setAirPumpDuty(uint8_t duty) {
+    airPumpDutyCommand = duty;
+    ledcWrite(airPumpPwmChannel, duty);
+}
+
+void setAirOutputs(bool pump, bool vent, bool hold, const char *mode) {
+    useFixedAirPins();
+    setAirPumpDuty(pump ? airPumpPwmMaxDuty : 0);
+    digitalWrite(airVentPin, vent ? HIGH : LOW);
+    digitalWrite(airHoldPin, hold ? HIGH : LOW);
+    strlcpy(airMode, mode, sizeof(airMode));
+}
+
+void airInflate() { setAirOutputs(true, false, false, "inflate"); }
+void airDeflate() { setAirOutputs(false, true, true, "deflate"); }
+void airKeep() { setAirOutputs(false, false, false, "keep"); }
+void airOff() {
+    airManualBits = 0;
+    airManualUntilMs = 0;
+    airAutoActionBits = 0;
+    airAutoActionStartMs = 0;
+    airAutoPauseUntilMs = 0;
+    airHardOverStartMs = 0;
+    airPidOutput = 0.0f;
+    airPidIntegral = 0.0f;
+    setAirPumpDuty(0);
+    digitalWrite(airVentPin, LOW);
+    digitalWrite(airHoldPin, LOW);
+    strlcpy(airMode, "off", sizeof(airMode));
+}
+
+void beginAirControl() {
+    airManualBits = 0;
+    airManualUntilMs = 0;
+    airAutoActionBits = 0;
+    airAutoActionStartMs = 0;
+    airAutoPauseUntilMs = 0;
+    airHardOverStartMs = 0;
+    airPidEstimateKpa = isfinite(airStableKpa) ? airStableKpa : airPressureKpa;
+    airPidIntegral = 0.0f;
+    airPidLastError = 0.0f;
+    airPidOutput = 0.0f;
+    lastAirPidEstimateMs = millis();
+    airPidWindowStartMs = millis();
+    lastAirControlMs = 0;
+    lastAirPrintMs = 0;
+    setAirOutputs(false, false, false, "check");
+    airControlEnabled = true;
+}
+
+void setAirAutoActuators(uint8_t bits, uint8_t pumpDuty, const char *mode) {
+    bits &= 0x07;
+    if (bits & 0x03) {
+        bits &= ~0x04;
+        pumpDuty = 0;
+    } else if (!(bits & 0x04)) {
+        pumpDuty = 0;
+    }
+
+    uint32_t now = millis();
+    if (airAutoActionBits != bits || (bits != 0 && airAutoActionStartMs == 0)) {
+        uint8_t previousBits = airAutoActionBits;
+        if ((previousBits & 0x03) && !(bits & 0x03)) {
+            lastAirValveStopMs = now;
+        }
+        airAutoActionBits = bits;
+        airAutoActionStartMs = bits ? now : 0;
+        if (bits || previousBits) {
+            lastAirActuationMs = now;
+        }
+    }
+
+    if (bits == 0) {
+        setAirPumpDuty(0);
+        digitalWrite(airVentPin, LOW);
+        digitalWrite(airHoldPin, LOW);
+        strlcpy(airMode, mode, sizeof(airMode));
+        return;
+    }
+
+    useFixedAirPins();
+    setAirPumpDuty((bits & 0x04) ? pumpDuty : 0);
+    digitalWrite(airVentPin, (bits & 0x01) ? HIGH : LOW);
+    digitalWrite(airHoldPin, (bits & 0x02) ? HIGH : LOW);
+    strlcpy(airMode, mode, sizeof(airMode));
+}
+
+void setAirAutoOutput(uint8_t bits, const char *mode) {
+    setAirAutoActuators(bits, (bits & 0x04) ? airPumpPwmMaxDuty : 0, mode);
+}
+
+bool airAutoCoolingDown() {
+    return (int32_t)(millis() - airAutoPauseUntilMs) < 0;
+}
+
+bool readAirSensor(AirReading &reading);
+
+bool validAirRange(float mn, float mx) {
+    return isfinite(mn) && isfinite(mx) &&
+           mn >= -4.0f && mx > mn && mx <= airHardLimitKpa;
+}
+
+bool airIsSettling() {
+    return (int32_t)(millis() - airSettleUntilMs) < 0;
+}
+
+uint16_t airSettleRemainingMs() {
+    if (!airIsSettling()) {
+        return 0;
+    }
+    uint32_t remaining = (uint32_t)(airSettleUntilMs - millis());
+    return (uint16_t)(remaining > 65000UL ? 65000UL : remaining);
+}
+
+void markAirSettle(uint16_t ms) {
+    if (ms == 0) {
+        return;
+    }
+    uint32_t now = millis();
+    airSettleUntilMs = now + ms;
+    lastAirActuationMs = now;
+}
+
+uint16_t airSettleMsForBits(uint8_t bits) {
+    if (bits & 0x04) {
+        return airInflateSettleMs;
+    }
+    if (bits & 0x03) {
+        return airDeflateSettleMs;
+    }
+    return 0;
+}
+
+bool airActuatorOutputActive() {
+    return airAutoActionBits != 0 ||
+           strcmp(airMode, "inflate") == 0 ||
+           strcmp(airMode, "deflate") == 0 ||
+           strcmp(airMode, "hardvent") == 0;
+}
+
+bool airSensorQuietWindowActive() {
+    uint32_t now = millis();
+    return lastAirActuationMs != 0 &&
+           now >= lastAirActuationMs &&
+           now - lastAirActuationMs < airPidSensorQuietMs;
+}
+
+bool airReadingUnreliableForControl(float pressureKpa) {
+    if (!isfinite(pressureKpa) || !isfinite(airStableKpa)) {
+        return false;
+    }
+    if (airActuatorOutputActive()) {
+        return true;
+    }
+    if (airSensorQuietWindowActive() && fabs(pressureKpa - airStableKpa) > 0.16f) {
+        return true;
+    }
+    if (airAutoCoolingDown() && fabs(pressureKpa - airStableKpa) > 0.30f) {
+        return true;
+    }
+    return false;
+}
+
+void updateAirStablePressure(float pressureKpa) {
+    if (!isfinite(pressureKpa)) {
+        return;
+    }
+    if (airManualBits != 0) {
+        return;
+    }
+    float candidate = pressureKpa;
+    if (airReadingUnreliableForControl(candidate)) {
+        candidate = airStableKpa;
+    } else if (airAutoActionBits != 0 && isfinite(airFilteredKpa) &&
+               fabs(candidate - airFilteredKpa) > airJumpRejectKpa) {
+        candidate = airFilteredKpa;
+    }
+    if (isnan(airStableKpa)) {
+        airStableKpa = candidate;
+        return;
+    }
+    if (airIsSettling()) {
+        return;
+    }
+    uint32_t now = millis();
+    if (now - lastAirActuationMs < airTransientRejectMs &&
+        fabs(candidate - airStableKpa) > airJumpRejectKpa) {
+        return;
+    }
+    float alpha = (airAutoActionBits != 0) ? 0.24f : 0.45f;
+    airStableKpa = airStableKpa * (1.0f - alpha) + candidate * alpha;
+}
+
+float airControlPressureKpa() {
+    return isfinite(airStableKpa) ? airStableKpa : airPressureKpa;
+}
+
+float airPressureTargetKpa() {
+    return (airMinKpa + airMaxKpa) * 0.5f;
+}
+
+bool airRecentInflateTransient() {
+    uint32_t now = millis();
+    uint32_t elapsed = (lastAirActuationMs != 0 && now >= lastAirActuationMs)
+                           ? (now - lastAirActuationMs)
+                           : 0;
+    return ((airAutoActionBits & 0x04) || strcmp(airMode, "inflate") == 0) &&
+           elapsed < airTransientRejectMs;
+}
+
+void updateAirFilteredPressure(float pressureKpa) {
+    if (!isfinite(pressureKpa)) {
+        return;
+    }
+
+    float candidate = pressureKpa;
+    if (airReadingUnreliableForControl(candidate)) {
+        candidate = airStableKpa;
+    }
+
+    if (isnan(airFilteredKpa)) {
+        airFilteredKpa = candidate;
+    } else {
+        airFilteredKpa = airFilteredKpa * 0.72f + candidate * 0.28f;
+    }
+}
+
+void updateAirPidEstimate(uint32_t now) {
+    if (!isfinite(airPidEstimateKpa)) {
+        airPidEstimateKpa = airControlPressureKpa();
+        if (!isfinite(airPidEstimateKpa)) {
+            airPidEstimateKpa = 0.0f;
+        }
+        lastAirPidEstimateMs = now;
+        return;
+    }
+
+    uint32_t elapsedMs = (lastAirPidEstimateMs != 0 && now >= lastAirPidEstimateMs)
+                             ? (now - lastAirPidEstimateMs)
+                             : 0;
+    lastAirPidEstimateMs = now;
+    float dt = min(elapsedMs / 1000.0f, 0.25f);
+
+    if (airAutoActionBits & 0x04) {
+        float dutyScale = constrain(airPumpDutyCommand / 255.0f, 0.0f, 1.0f);
+        airPidEstimateKpa += airInflateRateKpaPerSec * dutyScale * dt;
+    } else if (airAutoActionBits & 0x03) {
+        airPidEstimateKpa -= airDeflateRateKpaPerSec * dt;
+    } else if (!airAutoCoolingDown() && !airSensorQuietWindowActive()) {
+        float measured = airControlPressureKpa();
+        if (isfinite(measured)) {
+            float alpha = fabs(measured - airPidEstimateKpa) > 0.7f ? 0.70f : 0.45f;
+            airPidEstimateKpa = airPidEstimateKpa * (1.0f - alpha) + measured * alpha;
+        }
+    }
+
+    airPidEstimateKpa = constrain(airPidEstimateKpa, -4.0f, airHardLimitKpa + 0.6f);
+}
+
+uint8_t airPidOutputBits(float output, uint32_t now) {
+    if (fabs(output) < 0.08f) {
+        return 0;
+    }
+
+    if (airPidWindowStartMs == 0 || now - airPidWindowStartMs >= airPidWindowMs) {
+        airPidWindowStartMs = now;
+    }
+    uint16_t phase = (uint16_t)(now - airPidWindowStartMs);
+    float duty = constrain(fabs(output), 0.0f, 1.0f);
+    if (duty > 0.0f && duty < 0.22f) {
+        duty = 0.22f;
+    }
+
+    if (duty < 0.98f && phase >= (uint16_t)(duty * airPidWindowMs)) {
+        return 0;
+    }
+    return output > 0.0f ? 0x04 : 0x03;
+}
+
+uint8_t airPumpDutyForOutput(float output) {
+    if (output <= 0.0f) {
+        return 0;
+    }
+    float clipped = constrain(output, 0.0f, 1.0f);
+    uint8_t duty = (uint8_t)lroundf(airPumpPwmMinDuty +
+                                   clipped * (airPumpPwmMaxDuty - airPumpPwmMinDuty));
+    return constrain(duty, airPumpPwmMinDuty, airPumpPwmMaxDuty);
+}
+
+void applyAirPidControl(uint32_t now, float p) {
+    const float holdMargin = 0.02f;
+    const float controlOffset = 0.12f;
+    float target = airPressureTargetKpa();
+    bool inflating = (airAutoActionBits & 0x04) != 0;
+    bool deflating = (airAutoActionBits & 0x03) != 0;
+    bool needInflate = inflating ? (p < min(airMinKpa + controlOffset, airMaxKpa))
+                                 : (p < airMinKpa - holdMargin);
+    bool needDeflate = deflating ? (p > max(airMaxKpa - controlOffset, airMinKpa))
+                                 : (p > airMaxKpa + holdMargin);
+
+    if (!needInflate && !needDeflate) {
+        airPidIntegral *= 0.55f;
+        airPidLastError = 0.0f;
+        airPidOutput = 0.0f;
+        if ((airAutoActionBits & 0x03) && airAutoActionStartMs != 0 &&
+            now - airAutoActionStartMs < airValveMinOpenMs) {
+            setAirAutoOutput(0x03, "deflate");
+            return;
+        }
+        setAirAutoOutput(0, "keep");
+        return;
+    }
+
+    if (needInflate) {
+        target = min(airMinKpa + controlOffset, airMaxKpa);
+    } else if (needDeflate) {
+        target = max(airMaxKpa - controlOffset, airMinKpa);
+    }
+    float error = target - p;
+    float dt = airControlPeriodMs / 1000.0f;
+    airPidIntegral = constrain(airPidIntegral + error * dt, -2.0f, 2.0f);
+    float derivative = (error - airPidLastError) / max(dt, 0.001f);
+    airPidLastError = error;
+
+    float output = airPidKp * error + airPidKi * airPidIntegral + airPidKd * derivative;
+    if (fabs(error) < 0.07f) {
+        output = 0.0f;
+        airPidIntegral *= 0.65f;
+    }
+    if ((output > 0.0f && error <= 0.0f) || (output < 0.0f && error >= 0.0f)) {
+        output = 0.0f;
+        airPidIntegral *= 0.70f;
+    }
+    if (p >= airMaxKpa && output > 0.0f) {
+        output = 0.0f;
+        airPidIntegral *= 0.8f;
+    }
+    if (p <= airMinKpa && output < 0.0f) {
+        output = 0.0f;
+        airPidIntegral *= 0.8f;
+    }
+
+    if (error > 0.22f) {
+        output = 1.0f;
+    } else if (error < -0.35f) {
+        output = -1.0f;
+    }
+    output = constrain(output, -1.0f, 1.0f);
+    airPidOutput = output;
+
+    if (output > 0.0f) {
+        if ((airAutoActionBits & 0x03) && airAutoActionStartMs != 0 &&
+            now - airAutoActionStartMs < airValveMinOpenMs) {
+            setAirAutoOutput(0x03, "deflate");
+            return;
+        }
+        if (airAutoActionBits == 0x04 && airAutoActionStartMs != 0 &&
+            now - airAutoActionStartMs >= airPidMaxInflateOnMs) {
+            setAirAutoOutput(0, "check");
+            airAutoPauseUntilMs = now + 420;
+            return;
+        }
+        setAirAutoActuators(0x04, airPumpDutyForOutput(output), "inflate");
+        return;
+    }
+
+    if (output < 0.0f) {
+        bool valveOpen = (airAutoActionBits & 0x03) != 0;
+        uint32_t activeMs = (valveOpen && airAutoActionStartMs != 0 && now >= airAutoActionStartMs)
+                                ? (now - airAutoActionStartMs)
+                                : 0;
+        if (valveOpen) {
+            if (activeMs < airValveMinOpenMs ||
+                (error < -airValveCloseErrorKpa && activeMs < airAutoDeflatePulseMaxMs)) {
+                setAirAutoOutput(0x03, "deflate");
+                return;
+            }
+            setAirAutoOutput(0, "keep");
+            return;
+        }
+
+        bool largeDeflateError = error < -0.45f;
+        bool valveClosedLongEnough = lastAirValveStopMs == 0 ||
+                                     now < lastAirValveStopMs ||
+                                     now - lastAirValveStopMs >= airValveMinClosedMs;
+        if (error < -airValveOpenErrorKpa && (valveClosedLongEnough || largeDeflateError)) {
+            setAirAutoOutput(0x03, "deflate");
+        } else {
+            setAirAutoOutput(0, "keep");
+        }
+        return;
+    }
+
+    if ((airAutoActionBits & 0x03) && airAutoActionStartMs != 0 &&
+        now - airAutoActionStartMs < airValveMinOpenMs) {
+        setAirAutoOutput(0x03, "deflate");
+        return;
+    }
+    setAirAutoOutput(0, "keep");
+}
+
+bool airHardLimitConfirmed(float pressureKpa) {
+    if (!isfinite(pressureKpa) || pressureKpa <= airHardLimitKpa) {
+        airHardOverStartMs = 0;
+        return false;
+    }
+
+    float stable = airControlPressureKpa();
+    if (((airAutoActionBits & 0x04) || (airManualBits & 0x04) || strcmp(airMode, "inflate") == 0) &&
+        isfinite(stable) && stable <= airHardLimitKpa + 0.15f) {
+        airHardOverStartMs = 0;
+        return false;
+    }
+
+    if (airRecentInflateTransient() && isfinite(stable) &&
+        stable <= airHardLimitKpa + 0.15f) {
+        airHardOverStartMs = 0;
+        return false;
+    }
+
+    bool confirmedByStable = isfinite(stable) && stable > airHardLimitKpa + 0.05f;
+    bool confirmedByFiltered = isfinite(airFilteredKpa) && airFilteredKpa > airHardLimitKpa + 0.20f;
+    bool immediate = isfinite(stable) && stable > airHardLimitKpa + airHardImmediateMarginKpa;
+
+    if (!confirmedByStable && !confirmedByFiltered) {
+        airHardOverStartMs = 0;
+        return false;
+    }
+
+    if (immediate) {
+        airHardOverStartMs = 0;
+        return true;
+    }
+
+    uint32_t now = millis();
+    if (airHardOverStartMs == 0) {
+        airHardOverStartMs = now;
+        return false;
+    }
+    return now - airHardOverStartMs >= airHardConfirmMs;
+}
+
+void guardAirHardLimit(float pressureKpa) {
+    if (!airHardLimitConfirmed(pressureKpa)) {
+        return;
+    }
+    if (airIsSettling() && millis() - lastAirActuationMs < airTransientRejectMs) {
+        return;
+    }
+    if ((airManualBits & 0x04) || airControlEnabled || strcmp(airMode, "inflate") == 0) {
+        airManualBits = 0;
+        airManualUntilMs = 0;
+        setAirAutoOutput(0x03, "hardvent");
+        airAutoPauseUntilMs = millis() + min<uint16_t>(airAutoDeflatePulseMs, 800);
+        markAirSettle(airDeflateSettleMs);
+    }
+}
+
+uint16_t airDeflatePulseForError(float errorKpa) {
+    if (!isfinite(errorKpa) || errorKpa <= 0.0f) {
+        return airAutoDeflatePulseMs;
+    }
+    uint16_t ms = (uint16_t)(airAutoDeflatePulseMs + errorKpa * 180.0f);
+    return constrain(ms, airAutoDeflatePulseMs, airAutoDeflatePulseMaxMs);
+}
+
+void applyAirGear(uint8_t gear) {
+    if (gear < 1 || gear > airGearCount) {
+        gear = 2;
+    }
+    airSelectedGear = gear;
+    airMinKpa = airGearMin[gear - 1];
+    airMaxKpa = airGearMax[gear - 1];
+}
+
+void resetAirGearsToDefault() {
+    for (uint8_t i = 0; i < airGearCount; i++) {
+        airGearMin[i] = defaultAirGearMin[i];
+        airGearMax[i] = defaultAirGearMax[i];
+    }
+    applyAirGear(2);
+}
+
+void printAirGears() {
+    Serial0.printf("AIRGEARS selected=%u hard=%.2fkPa\n", airSelectedGear, airHardLimitKpa);
+    for (uint8_t i = 0; i < airGearCount; i++) {
+        Serial0.printf("AIRGEAR %u min=%.2f max=%.2f%s\n",
+                       i + 1, airGearMin[i], airGearMax[i],
+                       (airSelectedGear == i + 1) ? " selected" : "");
+    }
+}
+
+void pulseAirAction(void (*action)(), uint16_t ms) {
+    uint16_t settleMs = 0;
+    if (action == airInflate) {
+        settleMs = airInflateSettleMs;
+    } else if (action == airDeflate) {
+        settleMs = airDeflateSettleMs;
+    }
+    action();
+    delay(ms);
+    airOff();
+    markAirSettle(settleMs);
+    AirReading reading;
+    readAirSensor(reading);
+}
+
+void applyAirCandidateBits(uint8_t bits) {
+    useFixedAirPins();
+    setAirPumpDuty((bits & 0x04) ? airPumpPwmMaxDuty : 0);
+    digitalWrite(airVentPin, (bits & 0x01) ? HIGH : LOW);
+    digitalWrite(airHoldPin, (bits & 0x02) ? HIGH : LOW);
+}
+
+void applyAirManualBits(uint8_t bits, uint8_t pumpDuty) {
+    useFixedAirPins();
+    pumpDuty = constrain((int)pumpDuty, 0, (int)airPumpPwmMaxDuty);
+    setAirPumpDuty((bits & 0x04) ? pumpDuty : 0);
+    digitalWrite(airVentPin, (bits & 0x01) ? HIGH : LOW);
+    digitalWrite(airHoldPin, (bits & 0x02) ? HIGH : LOW);
+}
+
+bool airWrite8(uint8_t reg, uint8_t value) {
+    auto releasePin = [](int pin) {
+        releaseI2cPinWithPullup(pin);
+    };
+    auto pullLow = [](int pin) {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+    };
+    auto waitHigh = [](int pin, uint32_t us) {
+        uint32_t start = micros();
+        while (digitalRead(pin) == LOW && (uint32_t)(micros() - start) < us) {
+            delayMicroseconds(1);
+        }
+        return digitalRead(pin) == HIGH;
+    };
+    auto clkHigh = [&]() {
+        releasePin(airSclPin);
+        delayMicroseconds(4);
+        return waitHigh(airSclPin, 200);
+    };
+    auto clkLow = [&]() {
+        pullLow(airSclPin);
+        delayMicroseconds(4);
+    };
+    auto stopBus = [&]() {
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkHigh();
+        releasePin(airSdaPin);
+        delayMicroseconds(8);
+    };
+    auto startBus = [&]() {
+        releasePin(airSdaPin);
+        releasePin(airSclPin);
+        delayMicroseconds(8);
+        if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+            releasePin(airSdaPin);
+            for (int i = 0; i < 9; i++) {
+                clkLow();
+                clkHigh();
+            }
+            stopBus();
+            if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+                return false;
+            }
+        }
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkLow();
+        return true;
+    };
+    auto writeByte = [&](uint8_t data) {
+        for (int bit = 7; bit >= 0; bit--) {
+            if (data & (1 << bit)) releasePin(airSdaPin);
+            else pullLow(airSdaPin);
+            delayMicroseconds(2);
+            if (!clkHigh()) {
+                stopBus();
+                return false;
+            }
+            clkLow();
+        }
+        releasePin(airSdaPin);
+        delayMicroseconds(2);
+        if (!clkHigh()) {
+            stopBus();
+            return false;
+        }
+        bool ack = digitalRead(airSdaPin) == LOW;
+        clkLow();
+        return ack;
+    };
+
+    if (!startBus()) return false;
+    bool ok = writeByte((airSensorAddress << 1) | 0) &&
+              writeByte(reg) &&
+              writeByte(value);
+    stopBus();
+    return ok;
+}
+
+bool airReadBytes(uint8_t reg, uint8_t *buf, size_t len) {
+    auto releasePin = [](int pin) {
+        releaseI2cPinWithPullup(pin);
+    };
+    auto pullLow = [](int pin) {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+    };
+    auto waitHigh = [](int pin, uint32_t us) {
+        uint32_t start = micros();
+        while (digitalRead(pin) == LOW && (uint32_t)(micros() - start) < us) {
+            delayMicroseconds(1);
+        }
+        return digitalRead(pin) == HIGH;
+    };
+    auto clkHigh = [&]() {
+        releasePin(airSclPin);
+        delayMicroseconds(4);
+        return waitHigh(airSclPin, 200);
+    };
+    auto clkLow = [&]() {
+        pullLow(airSclPin);
+        delayMicroseconds(4);
+    };
+    auto stopBus = [&]() {
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkHigh();
+        releasePin(airSdaPin);
+        delayMicroseconds(8);
+    };
+    auto startBus = [&]() {
+        releasePin(airSdaPin);
+        releasePin(airSclPin);
+        delayMicroseconds(8);
+        if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+            releasePin(airSdaPin);
+            for (int i = 0; i < 9; i++) {
+                clkLow();
+                clkHigh();
+            }
+            stopBus();
+            if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+                return false;
+            }
+        }
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkLow();
+        return true;
+    };
+    auto writeByte = [&](uint8_t data) {
+        for (int bit = 7; bit >= 0; bit--) {
+            if (data & (1 << bit)) releasePin(airSdaPin);
+            else pullLow(airSdaPin);
+            delayMicroseconds(2);
+            if (!clkHigh()) {
+                stopBus();
+                return false;
+            }
+            clkLow();
+        }
+        releasePin(airSdaPin);
+        delayMicroseconds(2);
+        if (!clkHigh()) {
+            stopBus();
+            return false;
+        }
+        bool ack = digitalRead(airSdaPin) == LOW;
+        clkLow();
+        return ack;
+    };
+    auto readByte = [&](bool ack) {
+        uint8_t data = 0;
+        releasePin(airSdaPin);
+        for (int bit = 7; bit >= 0; bit--) {
+            if (!clkHigh()) {
+                stopBus();
+                return (uint8_t)0;
+            }
+            if (digitalRead(airSdaPin)) data |= (1 << bit);
+            clkLow();
+        }
+        if (ack) pullLow(airSdaPin);
+        else releasePin(airSdaPin);
+        delayMicroseconds(2);
+        clkHigh();
+        clkLow();
+        releasePin(airSdaPin);
+        return data;
+    };
+
+    if (!startBus()) return false;
+    if (!writeByte((airSensorAddress << 1) | 0) || !writeByte(reg)) {
+        stopBus();
+        return false;
+    }
+    if (!startBus() || !writeByte((airSensorAddress << 1) | 1)) {
+        stopBus();
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = readByte(i + 1 < len);
+    }
+    stopBus();
+    return true;
+}
+
+bool airAddressAck(uint8_t addr) {
+    auto releasePin = [](int pin) {
+        releaseI2cPinWithPullup(pin);
+    };
+    auto pullLow = [](int pin) {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+    };
+    auto waitHigh = [](int pin, uint32_t us) {
+        uint32_t start = micros();
+        while (digitalRead(pin) == LOW && (uint32_t)(micros() - start) < us) {
+            delayMicroseconds(1);
+        }
+        return digitalRead(pin) == HIGH;
+    };
+    auto clkHigh = [&]() {
+        releasePin(airSclPin);
+        delayMicroseconds(4);
+        return waitHigh(airSclPin, 200);
+    };
+    auto clkLow = [&]() {
+        pullLow(airSclPin);
+        delayMicroseconds(4);
+    };
+    auto stopBus = [&]() {
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkHigh();
+        releasePin(airSdaPin);
+        delayMicroseconds(8);
+    };
+    auto startBus = [&]() {
+        releasePin(airSdaPin);
+        releasePin(airSclPin);
+        delayMicroseconds(8);
+        if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+            releasePin(airSdaPin);
+            for (int i = 0; i < 9; i++) {
+                clkLow();
+                clkHigh();
+            }
+            stopBus();
+            if (!waitHigh(airSdaPin, 200) || !waitHigh(airSclPin, 200)) {
+                return false;
+            }
+        }
+        pullLow(airSdaPin);
+        delayMicroseconds(4);
+        clkLow();
+        return true;
+    };
+    auto writeByte = [&](uint8_t data) {
+        for (int bit = 7; bit >= 0; bit--) {
+            if (data & (1 << bit)) releasePin(airSdaPin);
+            else pullLow(airSdaPin);
+            delayMicroseconds(2);
+            if (!clkHigh()) {
+                stopBus();
+                return false;
+            }
+            clkLow();
+        }
+        releasePin(airSdaPin);
+        delayMicroseconds(2);
+        if (!clkHigh()) {
+            stopBus();
+            return false;
+        }
+        bool ack = digitalRead(airSdaPin) == LOW;
+        clkLow();
+        return ack;
+    };
+
+    if (!startBus()) return false;
+    bool ok = writeByte((addr << 1) | 0);
+    stopBus();
+    return ok;
+}
+
+void scanAirBus() {
+    if (airUseAnalogH10Sensor) {
+        AirReading reading;
+        if (readAirSensor(reading)) {
+            Serial0.printf("AIRBUS analog MCP-H10 pin=%d raw=%ld v=%.3f p=%.3fkPa\n",
+                           airAnalogPin, (long)reading.rawPressure,
+                           reading.voltage, reading.pressureKpa);
+        } else {
+            Serial0.printf("AIRBUS analog MCP-H10 pin=%d read failed\n", airAnalogPin);
+        }
+        return;
+    }
+
+    const int pairs[2][2] = {{4, 5}, {5, 4}};
+    int oldSda = airSdaPin;
+    int oldScl = airSclPin;
+    uint8_t oldAddr = airSensorAddress;
+    for (int p = 0; p < 2; p++) {
+        airSdaPin = pairs[p][0];
+        airSclPin = pairs[p][1];
+        releaseI2cPinWithPullup(airSdaPin);
+        releaseI2cPinWithPullup(airSclPin);
+        delay(5);
+        bool idleSda = digitalRead(airSdaPin);
+        bool idleScl = digitalRead(airSclPin);
+        Serial0.printf("AIRBUS pair=%d sda=%d scl=%d idleSDA=%d idleSCL=%d addrs=",
+                       p, airSdaPin, airSclPin,
+                       idleSda, idleScl);
+        bool any = false;
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (airAddressAck(addr)) {
+                Serial0.printf("0x%02X,", addr);
+                any = true;
+            }
+        }
+        if (!any) {
+            Serial0.print("none");
+        }
+        if (!idleSda || !idleScl) {
+            Serial0.print(" hint=bus-low-add-2k2-pullups-or-check-wiring");
+        }
+        Serial0.println();
+    }
+    airSdaPin = oldSda;
+    airSclPin = oldScl;
+    airSensorAddress = oldAddr;
+}
+
+bool readAirSensor(AirReading &reading) {
+    reading = {false, NAN, NAN, 0, 0, NAN};
+    if (airUseAnalogH10Sensor) {
+        pinMode(airAnalogPin, INPUT);
+        delayMicroseconds(60);
+        uint32_t rawSum = 0;
+        uint32_t mvSum = 0;
+        const int samples = 4;
+        for (int i = 0; i < samples; i++) {
+            rawSum += analogRead(airAnalogPin);
+            mvSum += analogReadMilliVolts(airAnalogPin);
+            delayMicroseconds(80);
+        }
+        uint16_t raw = rawSum / samples;
+        float voltage = (mvSum / (float)samples) / 1000.0f;
+        if (!isfinite(voltage) || voltage <= 0.01f) {
+            voltage = raw * 3.3f / 4095.0f;
+        }
+        reading.ok = true;
+        reading.rawPressure = raw;
+        reading.rawTemperature = 0;
+        reading.voltage = voltage;
+        reading.pressureKpa = xgzp6847C05KppKpaPerVolt * (voltage - airZeroVoltage);
+        reading.temperatureC = NAN;
+        airSensorOnline = true;
+        airPressureKpa = reading.pressureKpa;
+        airTemperatureC = reading.temperatureC;
+        airSensorVoltage = reading.voltage;
+        updateAirStablePressure(reading.pressureKpa);
+        updateAirFilteredPressure(reading.pressureKpa);
+        guardAirHardLimit(reading.pressureKpa);
+        return true;
+    }
+
+    uint8_t status = 0;
+    bool statusOk = false;
+    for (int attempt = 0; attempt < 6; attempt++) {
+        statusOk = airReadBytes(mcpH11StatusReg, &status, 1);
+        if (!statusOk) {
+            airSensorOnline = false;
+            return false;
+        }
+        if (status & 0x02) {
+            break;
+        }
+        delay(4);
+    }
+
+    uint8_t data[5] = {0};
+    if (!airReadBytes(mcpH11PressureReg, data, sizeof(data))) {
+        airSensorOnline = false;
+        return false;
+    }
+
+    uint32_t rawP = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+    uint16_t rawT = ((uint16_t)data[3] << 8) | data[4];
+    reading.ok = true;
+    reading.rawPressure = signExtend24(rawP);
+    reading.rawTemperature = signExtend16(rawT);
+    reading.pressureKpa = mcpH11B10KppA * ((float)reading.rawPressure / mcpH11PressureDen) + mcpH11B10KppB;
+    reading.temperatureC = (float)reading.rawTemperature / 256.0f;
+    airSensorOnline = true;
+    airPressureKpa = reading.pressureKpa;
+    airTemperatureC = reading.temperatureC;
+    updateAirStablePressure(reading.pressureKpa);
+    updateAirFilteredPressure(reading.pressureKpa);
+    guardAirHardLimit(reading.pressureKpa);
+    return true;
+}
+
+bool readAnalogPinVoltage(int pin, uint16_t &raw, float &voltage) {
+    pinMode(pin, INPUT);
+    analogSetPinAttenuation(pin, ADC_11db);
+    delayMicroseconds(250);
+    uint32_t rawSum = 0;
+    uint32_t mvSum = 0;
+    const int samples = 24;
+    for (int i = 0; i < samples; i++) {
+        rawSum += analogRead(pin);
+        mvSum += analogReadMilliVolts(pin);
+        delayMicroseconds(500);
+    }
+    raw = rawSum / samples;
+    voltage = (mvSum / (float)samples) / 1000.0f;
+    if (!isfinite(voltage) || voltage <= 0.01f) {
+        voltage = raw * 3.3f / 4095.0f;
+    }
+    return isfinite(voltage);
+}
+
+bool airAnalogPinAllowed(int pin) {
+    for (int candidate : airAnalogCandidatePins) {
+        if (pin == candidate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void scanAirAnalogPins() {
+    Serial0.print("AIRADC selected=");
+    Serial0.print(airAnalogPin);
+    Serial0.print(" values=");
+    for (int pin : airAnalogCandidatePins) {
+        uint16_t raw = 0;
+        float voltage = NAN;
+        bool ok = readAnalogPinVoltage(pin, raw, voltage);
+        Serial0.printf(" GPIO%d:%sraw=%u,v=%.3f;", pin, ok ? "" : "bad,", raw, voltage);
+    }
+    Serial0.println();
+}
+
+bool probeAirAddress(uint8_t addr) {
+    uint8_t oldAddr = airSensorAddress;
+    airSensorAddress = addr;
+    AirReading reading;
+    bool ok = readAirSensor(reading);
+    airSensorAddress = oldAddr;
+    return ok;
+}
+
+bool findAirSensor(bool verbose) {
+    if (airUseAnalogH10Sensor) {
+        AirReading reading;
+        bool ok = readAirSensor(reading);
+        if (verbose) {
+            Serial0.printf("AIRSCAN analog MCP-H10 pin=%d ok=%d raw=%ld v=%.3f p=%.3fkPa formula=B10KPP_3V3\n",
+                           airAnalogPin, ok ? 1 : 0, (long)reading.rawPressure,
+                           reading.voltage, reading.pressureKpa);
+            Serial0.println("AIRSCAN wiring: sensor pin2=GND, pin3=VOUT to ESP32 GPIO4, pin5=3.3V, pin1/4/6=N/C.");
+        }
+        return ok;
+    }
+
+    const int pairs[2][2] = {{4, 5}, {5, 4}};
+    const uint8_t preferred[] = {0x36, 0x6D, 0x28};
+    int oldSda = airSdaPin;
+    int oldScl = airSclPin;
+    uint8_t oldAddr = airSensorAddress;
+
+    for (int p = 0; p < 2; p++) {
+        airSdaPin = pairs[p][0];
+        airSclPin = pairs[p][1];
+        releaseI2cPinWithPullup(airSdaPin);
+        releaseI2cPinWithPullup(airSclPin);
+        delay(5);
+        bool idleSda = digitalRead(airSdaPin);
+        bool idleScl = digitalRead(airSclPin);
+        if (verbose) {
+            Serial0.printf("AIRSCAN try sda=%d scl=%d idleSDA=%d idleSCL=%d\n",
+                           airSdaPin, airSclPin,
+                           idleSda, idleScl);
+            if (!idleSda || !idleScl) {
+                Serial0.println("AIRSCAN hint: I2C line is still low after internal pull-up; add external 2.2k pull-ups to 3.3V or check pin orientation/short.");
+            }
+        }
+
+        for (uint8_t addr : preferred) {
+            airSensorAddress = addr;
+            AirReading reading;
+            if (readAirSensor(reading)) {
+                if (verbose) {
+                    Serial0.printf("AIRSCAN found addr=0x%02X sda=%d scl=%d p=%.3fkPa t=%.2fC\n",
+                                   airSensorAddress, airSdaPin, airSclPin,
+                                   reading.pressureKpa, reading.temperatureC);
+                }
+                return true;
+            }
+        }
+
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            airSensorAddress = addr;
+            AirReading reading;
+            if (readAirSensor(reading)) {
+                if (verbose) {
+                    Serial0.printf("AIRSCAN found addr=0x%02X sda=%d scl=%d p=%.3fkPa t=%.2fC\n",
+                                   airSensorAddress, airSdaPin, airSclPin,
+                                   reading.pressureKpa, reading.temperatureC);
+                }
+                return true;
+            }
+        }
+    }
+
+    airSensorOnline = false;
+    airSdaPin = oldSda;
+    airSclPin = oldScl;
+    airSensorAddress = oldAddr;
+    if (verbose) {
+        Serial0.println("AIRSCAN no MCP-H11 sensor found. Try swapping GPIO4/GPIO5 SDA/SCL.");
+    }
+    return false;
+}
+
+bool ensureAirSensor(bool verbose = false) {
+    AirReading reading;
+    if (readAirSensor(reading)) {
+        if (verbose) {
+            Serial0.printf("AIRREAD ok=1 p=%.3fkPa stable=%.3fkPa filtered=%.3fkPa settle=%ums v=%.3fV temp=%.2fC raw=%ld addr=0x%02X sda=%d scl=%d\n",
+                           airPressureKpa, airStableKpa, airFilteredKpa, airSettleRemainingMs(),
+                           airSensorVoltage, airTemperatureC, (long)reading.rawPressure,
+                           airSensorAddress, airSdaPin, airSclPin);
+        }
+        return true;
+    }
+    return findAirSensor(verbose);
+}
+
+void saveAirSettings() {
+    Preferences prefs;
+    if (!prefs.begin(calibrationNamespace, false)) {
+        Serial0.println("AIR save failed: NVS open failed");
+        return;
+    }
+    useFixedAirPins();
+    prefs.putInt("airPump", airPumpPin);
+    prefs.putInt("airVent", airVentPin);
+    prefs.putInt("airHold", airHoldPin);
+    prefs.putInt("airSda", airSdaPin);
+    prefs.putInt("airScl", airSclPin);
+    prefs.putInt("airAdc", airAnalogPin);
+    prefs.putUInt("airAddr", airSensorAddress);
+    prefs.putBool("airMapOk", true);
+    prefs.putFloat("airMin", airMinKpa);
+    prefs.putFloat("airMax", airMaxKpa);
+    prefs.putFloat("airZeroV", airZeroVoltage);
+    prefs.putUChar("airGear", airSelectedGear);
+    prefs.putUInt("airInfMs", airAutoInflatePulseMs);
+    prefs.putUInt("airDefMs", airAutoDeflatePulseMs);
+    prefs.putUInt("airManInf", airManualInflatePulseMs);
+    prefs.putUInt("airManDef", airManualDeflatePulseMs);
+    prefs.putUInt("airDefMax", airAutoDeflatePulseMaxMs);
+    prefs.putUInt("airPeriod", airControlPeriodMs);
+    prefs.putUInt("airInfSet", airInflateSettleMs);
+    prefs.putUInt("airDefSet", airDeflateSettleMs);
+    prefs.putUInt("airTrans", airTransientRejectMs);
+    prefs.putFloat("airJump", airJumpRejectKpa);
+    prefs.putFloat("airHard", airHardLimitKpa);
+    prefs.putFloat("airKp", airPidKp);
+    prefs.putFloat("airKi", airPidKi);
+    prefs.putFloat("airKd", airPidKd);
+    prefs.putFloat("airInfRate", airInflateRateKpaPerSec);
+    prefs.putFloat("airDefRate", airDeflateRateKpaPerSec);
+    for (uint8_t i = 0; i < airGearCount; i++) {
+        char keyMin[12];
+        char keyMax[12];
+        snprintf(keyMin, sizeof(keyMin), "airG%uMin", i + 1);
+        snprintf(keyMax, sizeof(keyMax), "airG%uMax", i + 1);
+        prefs.putFloat(keyMin, airGearMin[i]);
+        prefs.putFloat(keyMax, airGearMax[i]);
+    }
+    prefs.end();
+    Serial0.printf("AIR saved map=%d gear=%u pump=%d vent=%d hold=%d adc=%d sda=%d scl=%d addr=0x%02X range=%.2f..%.2fkPa zero=%.3fV\n",
+                   airPinMapConfirmed ? 1 : 0,
+                   airSelectedGear,
+                   airPumpPin, airVentPin, airHoldPin, airAnalogPin, airSdaPin, airSclPin,
+                   airSensorAddress, airMinKpa, airMaxKpa, airZeroVoltage);
+    printAirTuneParams();
+}
+
+void loadAirSettings() {
+    Preferences prefs;
+    if (!prefs.begin(calibrationNamespace, true)) {
+        return;
+    }
+    airSdaPin = prefs.getInt("airSda", airSdaPin);
+    airSclPin = prefs.getInt("airScl", airSclPin);
+    airAnalogPin = prefs.getInt("airAdc", airAnalogPin);
+    airSensorAddress = (uint8_t)prefs.getUInt("airAddr", airSensorAddress);
+    airMinKpa = prefs.getFloat("airMin", airMinKpa);
+    airMaxKpa = prefs.getFloat("airMax", airMaxKpa);
+    airZeroVoltage = prefs.getFloat("airZeroV", airZeroVoltage);
+    airSelectedGear = prefs.getUChar("airGear", airSelectedGear);
+    airAutoInflatePulseMs = (uint16_t)prefs.getUInt("airInfMs", airAutoInflatePulseMs);
+    airAutoDeflatePulseMs = (uint16_t)prefs.getUInt("airDefMs", airAutoDeflatePulseMs);
+    airManualInflatePulseMs = (uint16_t)prefs.getUInt("airManInf", airManualInflatePulseMs);
+    airManualDeflatePulseMs = (uint16_t)prefs.getUInt("airManDef", airManualDeflatePulseMs);
+    airAutoDeflatePulseMaxMs = (uint16_t)prefs.getUInt("airDefMax", airAutoDeflatePulseMaxMs);
+    airControlPeriodMs = (uint16_t)prefs.getUInt("airPeriod", airControlPeriodMs);
+    airInflateSettleMs = (uint16_t)prefs.getUInt("airInfSet", airInflateSettleMs);
+    airDeflateSettleMs = (uint16_t)prefs.getUInt("airDefSet", airDeflateSettleMs);
+    airTransientRejectMs = (uint16_t)prefs.getUInt("airTrans", airTransientRejectMs);
+    airJumpRejectKpa = prefs.getFloat("airJump", airJumpRejectKpa);
+    airHardLimitKpa = prefs.getFloat("airHard", airHardLimitKpa);
+    airPidKp = prefs.getFloat("airKp", airPidKp);
+    airPidKi = prefs.getFloat("airKi", airPidKi);
+    airPidKd = prefs.getFloat("airKd", airPidKd);
+    airInflateRateKpaPerSec = prefs.getFloat("airInfRate", airInflateRateKpaPerSec);
+    airDeflateRateKpaPerSec = prefs.getFloat("airDefRate", airDeflateRateKpaPerSec);
+    for (uint8_t i = 0; i < airGearCount; i++) {
+        char keyMin[12];
+        char keyMax[12];
+        snprintf(keyMin, sizeof(keyMin), "airG%uMin", i + 1);
+        snprintf(keyMax, sizeof(keyMax), "airG%uMax", i + 1);
+        airGearMin[i] = prefs.getFloat(keyMin, airGearMin[i]);
+        airGearMax[i] = prefs.getFloat(keyMax, airGearMax[i]);
+    }
+    prefs.end();
+    clampAirTuneParams();
+
+    if (airAutoInflatePulseMs < 1000) {
+        airAutoInflatePulseMs = defaultAirAutoInflatePulseMs;
+    }
+    if (airAutoDeflatePulseMs < 300) {
+        airAutoDeflatePulseMs = defaultAirAutoDeflatePulseMs;
+    }
+    if (airControlPeriodMs == 25) {
+        airControlPeriodMs = defaultAirControlPeriodMs;
+    }
+    if (airControlPeriodMs > 250) {
+        airControlPeriodMs = defaultAirControlPeriodMs;
+    }
+    clampAirTuneParams();
+
+    useFixedAirPins();
+    bool gearBad = false;
+    for (uint8_t i = 0; i < airGearCount; i++) {
+        if (!validAirRange(airGearMin[i], airGearMax[i])) {
+            gearBad = true;
+        }
+    }
+    if (gearBad) {
+        resetAirGearsToDefault();
+    } else {
+        if (airSelectedGear < 1 || airSelectedGear > airGearCount) {
+            airSelectedGear = 2;
+        }
+        applyAirGear(airSelectedGear);
+    }
+    if (!validAirRange(airMinKpa, airMaxKpa) ||
+        (fabs(airMinKpa - 2.6f) < 0.01f && fabs(airMaxKpa - 3.0f) < 0.01f)) {
+        applyAirGear(airSelectedGear);
+    }
+    if (!airAnalogPinAllowed(airAnalogPin)) {
+        airAnalogPin = 4;
+    }
+    if (!isfinite(airZeroVoltage) || airZeroVoltage < 1.0f || airZeroVoltage > 1.9f) {
+        airZeroVoltage = defaultAirZeroVoltage;
+    }
+}
+
+void printAirStatus() {
+    Serial0.printf("AIRSTATUS on=%d mode=%s ok=%d map=%d gear=%u p=%.3f stable=%.3f filtered=%.3f est=%.3f pid=%.3f duty=%u target=%.3f settle=%u v=%.3f zero=%.3f temp=%.2f min=%.2f max=%.2f pump=%d vent=%d hold=%d adc=%d sda=%d scl=%d addr=0x%02X\n",
+                   airControlEnabled ? 1 : 0, airMode, airSensorOnline ? 1 : 0,
+                   airPinMapConfirmed ? 1 : 0,
+                   airSelectedGear,
+                   airPressureKpa, airStableKpa, airFilteredKpa,
+                   airPidEstimateKpa, airPidOutput, airPumpDutyCommand, airPressureTargetKpa(),
+                   airSettleRemainingMs(),
+                   airSensorVoltage, airZeroVoltage, airTemperatureC,
+                   airMinKpa, airMaxKpa, airPumpPin, airVentPin, airHoldPin,
+                   airAnalogPin, airSdaPin, airSclPin, airSensorAddress);
+}
+
+void clampAirTuneParams() {
+    airAutoInflatePulseMs = constrain(airAutoInflatePulseMs, (uint16_t)500, (uint16_t)6000);
+    airAutoDeflatePulseMs = constrain(airAutoDeflatePulseMs, (uint16_t)300, (uint16_t)5000);
+    airManualInflatePulseMs = constrain(airManualInflatePulseMs, (uint16_t)5, (uint16_t)2000);
+    airManualDeflatePulseMs = constrain(airManualDeflatePulseMs, (uint16_t)20, (uint16_t)2500);
+    airAutoDeflatePulseMaxMs = constrain(airAutoDeflatePulseMaxMs, airAutoDeflatePulseMs, (uint16_t)3000);
+    airControlPeriodMs = constrain(airControlPeriodMs, (uint16_t)10, (uint16_t)1000);
+    airInflateSettleMs = constrain(airInflateSettleMs, (uint16_t)200, (uint16_t)8000);
+    airDeflateSettleMs = constrain(airDeflateSettleMs, (uint16_t)200, (uint16_t)8000);
+    airTransientRejectMs = constrain(airTransientRejectMs, (uint16_t)0, (uint16_t)10000);
+    airJumpRejectKpa = constrain(airJumpRejectKpa, 0.05f, 5.0f);
+    airHardLimitKpa = constrain(airHardLimitKpa, 0.6f, 8.0f);
+    airPidKp = constrain(airPidKp, 0.0f, 8.0f);
+    airPidKi = constrain(airPidKi, 0.0f, 2.0f);
+    airPidKd = constrain(airPidKd, 0.0f, 2.0f);
+    airInflateRateKpaPerSec = constrain(airInflateRateKpaPerSec, 0.01f, 1.0f);
+    airDeflateRateKpaPerSec = constrain(airDeflateRateKpaPerSec, 0.05f, 6.0f);
+}
+
+void printAirTuneParams() {
+    Serial0.printf("AIRTUNE inflate=%u deflate=%u manualInflate=%u manualDeflate=%u deflateMax=%u period=%u inflateSettle=%u deflateSettle=%u transient=%u jump=%.3f hard=%.3f kp=%.3f ki=%.3f kd=%.3f infRate=%.3f defRate=%.3f\n",
+                   airAutoInflatePulseMs, airAutoDeflatePulseMs,
+                   airManualInflatePulseMs, airManualDeflatePulseMs,
+                   airAutoDeflatePulseMaxMs, airControlPeriodMs,
+                   airInflateSettleMs, airDeflateSettleMs,
+                   airTransientRejectMs, airJumpRejectKpa, airHardLimitKpa,
+                   airPidKp, airPidKi, airPidKd,
+                   airInflateRateKpaPerSec, airDeflateRateKpaPerSec);
+}
+
+void resetAirTuneParams() {
+    airAutoInflatePulseMs = defaultAirAutoInflatePulseMs;
+    airAutoDeflatePulseMs = defaultAirAutoDeflatePulseMs;
+    airManualInflatePulseMs = defaultAirManualInflatePulseMs;
+    airManualDeflatePulseMs = defaultAirManualDeflatePulseMs;
+    airAutoDeflatePulseMaxMs = defaultAirAutoDeflatePulseMaxMs;
+    airControlPeriodMs = defaultAirControlPeriodMs;
+    airInflateSettleMs = defaultAirInflateSettleMs;
+    airDeflateSettleMs = defaultAirDeflateSettleMs;
+    airTransientRejectMs = defaultAirTransientRejectMs;
+    airJumpRejectKpa = defaultAirJumpRejectKpa;
+    airHardLimitKpa = defaultAirHardLimitKpa;
+    airPidKp = defaultAirPidKp;
+    airPidKi = defaultAirPidKi;
+    airPidKd = defaultAirPidKd;
+    airInflateRateKpaPerSec = defaultAirInflateRateKpaPerSec;
+    airDeflateRateKpaPerSec = defaultAirDeflateRateKpaPerSec;
+    clampAirTuneParams();
+}
+
+bool calibrateAirZero() {
+    if (!airUseAnalogH10Sensor) {
+        return false;
+    }
+    float oldZero = airZeroVoltage;
+    airZeroVoltage = 0.0f;
+    float sum = 0.0f;
+    int count = 0;
+    for (int i = 0; i < 20; i++) {
+        AirReading reading;
+        if (readAirSensor(reading) && isfinite(reading.voltage)) {
+            sum += reading.voltage;
+            count++;
+        }
+        delay(25);
+    }
+    if (count < 8) {
+        airZeroVoltage = oldZero;
+        return false;
+    }
+    airZeroVoltage = sum / count;
+    airPressureKpa = 0.0f;
+    airFilteredKpa = 0.0f;
+    airStableKpa = 0.0f;
+    saveAirSettings();
+    AirReading reading;
+    readAirSensor(reading);
+    Serial0.printf("AIRZERO ok zero=%.3fV samples=%d p=%.3fkPa\n",
+                   airZeroVoltage, count, airPressureKpa);
+    return true;
+}
+
+void setupAirControl() {
+    loadAirSettings();
+    setupAirPins();
+    if (airUseAnalogH10Sensor) {
+        analogReadResolution(12);
+        analogSetPinAttenuation(airAnalogPin, ADC_11db);
+        pinMode(airAnalogPin, INPUT);
+    } else {
+        releaseI2cPinWithPullup(airSdaPin);
+        releaseI2cPinWithPullup(airSclPin);
+    }
+    delay(5);
+    AirReading reading;
+    if (readAirSensor(reading)) {
+        if (airUseAnalogH10Sensor) {
+            Serial0.printf("AIR boot analog MCP-H10 ok pin=%d raw=%ld v=%.3f p=%.3fkPa\n",
+                           airAnalogPin, (long)reading.rawPressure, reading.voltage, reading.pressureKpa);
+        } else {
+            Serial0.printf("AIR boot sensor ok addr=0x%02X sda=%d scl=%d p=%.3fkPa t=%.2fC\n",
+                           airSensorAddress, airSdaPin, airSclPin,
+                           reading.pressureKpa, reading.temperatureC);
+        }
+    } else {
+        Serial0.println("AIR boot sensor not read yet. Use airscan to test pressure sensor.");
+    }
+}
+
+void handleAirControl() {
+    if (!airControlEnabled) {
+        return;
+    }
+    uint32_t now = millis();
+    if (now - lastAirControlMs < airControlPeriodMs) {
+        return;
+    }
+    lastAirControlMs = now;
+
+    if (!ensureAirSensor(false)) {
+        airControlEnabled = false;
+        airOff();
+        if (now - lastAirPrintMs > 1000) {
+            lastAirPrintMs = now;
+            Serial0.println("AIRSTATUS sensor=lost action=off");
+        }
+        return;
+    }
+
+    float rawP = airPressureKpa;
+    updateAirPidEstimate(now);
+    float p = airPidEstimateKpa;
+    if (!isfinite(p)) {
+        p = airControlPressureKpa();
+    }
+    if (!isfinite(p)) {
+        p = rawP;
+    }
+
+    if (airHardLimitConfirmed(rawP)) {
+        setAirAutoOutput(0x03, "hardvent");
+        if (now - airAutoActionStartMs > airAutoDeflatePulseMs) {
+            airControlEnabled = false;
+            airOff();
+            Serial0.println("AIRSTATUS on=0 error=hard-limit-deflated");
+        }
+    } else if (airManualBits != 0) {
+        return;
+    } else if (airAutoCoolingDown()) {
+        setAirAutoOutput(0, "settle");
+    } else {
+        applyAirPidControl(now, p);
+    }
+
+    if (!isWebPlaybackActive() && now - lastAirPrintMs > 1000) {
+        lastAirPrintMs = now;
+        printAirStatus();
+    }
+}
+
+bool sampleAirPressureAverage(float &pressure, uint8_t samples = 4, uint16_t intervalMs = 18) {
+    float sum = 0.0f;
+    int count = 0;
+    for (uint8_t i = 0; i < samples; i++) {
+        AirReading reading;
+        if (readAirSensor(reading) && !isnan(reading.pressureKpa)) {
+            sum += reading.pressureKpa;
+            count++;
+        }
+        if (i + 1 < samples) {
+            delay(intervalMs);
+        }
+    }
+    if (count == 0) {
+        pressure = NAN;
+        return false;
+    }
+    pressure = sum / count;
+    return true;
+}
+
+float measureAirSlopeForBits(uint8_t bits, uint16_t ms) {
+    airOff();
+    delay(180);
+    float a = NAN;
+    float b = NAN;
+    if (!ensureAirSensor(false) || !sampleAirPressureAverage(a)) {
+        airOff();
+        return NAN;
+    }
+    if (!isnan(a) && a > airIdentifyAbortKpa) {
+        airOff();
+        return NAN;
+    }
+    applyAirCandidateBits(bits);
+    strlcpy(airMode, "detect", sizeof(airMode));
+    delay(ms);
+    if (!sampleAirPressureAverage(b, 3, 12)) {
+        airOff();
+        return NAN;
+    }
+    airOff();
+    if (!isnan(b) && b > airIdentifyAbortKpa) {
+        Serial0.printf("AIRAUTOID abort-safe pressure=%.3fkPa\n", b);
+    }
+    return b - a;
+}
+
+void runAirPinTest() {
+    bool wasOn = airControlEnabled;
+    airControlEnabled = false;
+    Serial0.println("AIRTEST: each candidate pin will turn ON for 80 ms.");
+    for (int i = 0; i < 3; i++) {
+        airOff();
+        delay(350);
+        Serial0.printf("AIRTEST pin=%d ON\n", airCandidatePins[i]);
+        if (airCandidatePins[i] == airPumpPin) {
+            setAirPumpDuty(airPumpPwmMaxDuty);
+        } else {
+            digitalWrite(airCandidatePins[i], HIGH);
+        }
+        delay(80);
+        airOff();
+        AirReading reading;
+        readAirSensor(reading);
+        printAirStatus();
+    }
+    airOff();
+    airControlEnabled = wasOn;
+    Serial0.println("AIRTEST done.");
+}
+
+bool rawAirPulse(int pin, uint16_t ms) {
+    bool allowed = false;
+    for (int candidate : airCandidatePins) {
+        if (pin == candidate) {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed) {
+        Serial0.println("AIRPULSE error=bad-pin allowed=9,10,11");
+        return false;
+    }
+    ms = constrain(ms, (uint16_t)20, airRawPulseMaxMs);
+    bool wasOn = airControlEnabled;
+    airControlEnabled = false;
+    airOff();
+    delay(120);
+    float before = NAN;
+    float after = NAN;
+    sampleAirPressureAverage(before, 4, 15);
+    if (pin == airPumpPin) {
+        setAirPumpDuty(airPumpPwmMaxDuty);
+    } else {
+        digitalWrite(pin, HIGH);
+    }
+    strlcpy(airMode, "rawpulse", sizeof(airMode));
+    delay(ms);
+    sampleAirPressureAverage(after, 3, 12);
+    airOff();
+    AirReading guard;
+    if (readAirSensor(guard) && !isnan(guard.pressureKpa) && guard.pressureKpa > airHardLimitKpa) {
+        pulseAirAction(airDeflate, airAutoDeflatePulseMs);
+        Serial0.printf("AIRPULSE stopped pressure=%.3fkPa hard=%.3fkPa\n",
+                       guard.pressureKpa, airHardLimitKpa);
+    }
+    airControlEnabled = wasOn;
+    Serial0.printf("AIRPULSE pin=%d ms=%u before=%.4fkPa after=%.4fkPa delta=%.4fkPa\n",
+                   pin, ms, before, after, after - before);
+    return true;
+}
+
+bool safeAirProbeBits(uint8_t bits, uint16_t totalMs) {
+    bits &= 0x07;
+    totalMs = constrain(totalMs, (uint16_t)airProbeChunkMs, airProbeMaxMs);
+    bool wasOn = airControlEnabled;
+    airControlEnabled = false;
+    airOff();
+    delay(150);
+
+    float before = NAN;
+    float current = NAN;
+    if (!sampleAirPressureAverage(before, 5, 15)) {
+        Serial0.println("AIRPROBE error=sensor-read");
+        airControlEnabled = wasOn;
+        return false;
+    }
+    if (!isnan(before) && before > airIdentifyAbortKpa) {
+        Serial0.printf("AIRPROBE refused pressure=%.3fkPa safe=%.3fkPa\n", before, airIdentifyAbortKpa);
+        airControlEnabled = wasOn;
+        return false;
+    }
+
+    uint16_t elapsed = 0;
+    bool stopped = false;
+    applyAirCandidateBits(bits);
+    strlcpy(airMode, "probe", sizeof(airMode));
+    while (elapsed < totalMs) {
+        uint16_t chunk = min((uint16_t)(totalMs - elapsed), airProbeChunkMs);
+        delay(chunk);
+        elapsed += chunk;
+        delay(30);
+        sampleAirPressureAverage(current, 3, 10);
+        float delta = current - before;
+        Serial0.printf("AIRPROBE bits=%u elapsed=%u p=%.4fkPa delta=%.4fkPa\n",
+                       bits, elapsed, current, delta);
+        if (!isnan(current) && current > airHardLimitKpa) {
+            pulseAirAction(airDeflate, airAutoDeflatePulseMs);
+            Serial0.printf("AIRPROBE stopped hard pressure=%.3fkPa hard=%.3fkPa\n",
+                           current, airHardLimitKpa);
+            stopped = true;
+            break;
+        }
+        if (!isnan(current) && current > airIdentifyAbortKpa) {
+            Serial0.printf("AIRPROBE stopped safe pressure=%.3fkPa safe=%.3fkPa\n",
+                           current, airIdentifyAbortKpa);
+            stopped = true;
+            break;
+        }
+    }
+    airOff();
+    airControlEnabled = wasOn;
+    Serial0.printf("AIRPROBE done bits=%u total=%u stopped=%d before=%.4fkPa last=%.4fkPa delta=%.4fkPa\n",
+                   bits, elapsed, stopped ? 1 : 0, before, current, current - before);
+    return true;
+}
+
+void stopAirManualBits(const char *reason) {
+    if (airManualBits == 0) {
+        airOff();
+        return;
+    }
+    uint8_t oldBits = airManualBits;
+    airManualBits = 0;
+    airManualUntilMs = 0;
+    airOff();
+    markAirSettle(airSettleMsForBits(oldBits));
+    Serial0.printf("AIRBITS off reason=%s\n", reason);
+    printAirStatus();
+}
+
+bool startAirManualBits(uint8_t bits, uint16_t totalMs, uint8_t pumpDuty) {
+    bits &= 0x07;
+    if (totalMs != 0) {
+        totalMs = constrain(totalMs, (uint16_t)50, airManualBitsMaxMs);
+    }
+    pumpDuty = constrain((int)pumpDuty, 0, (int)airPumpPwmMaxDuty);
+    airControlEnabled = false;
+    if (bits == 0) {
+        if (airManualBits == 0) {
+            airOff();
+            Serial0.println("AIRBITS off reason=command");
+            printAirStatus();
+        } else {
+            stopAirManualBits("command");
+        }
+        return true;
+    }
+
+    if (!ensureAirSensor(false)) {
+        airOff();
+        Serial0.println("AIRBITS error=sensor-read");
+        return false;
+    }
+    float p = airPressureKpa;
+    if (!isnan(p) && p > airHardLimitKpa) {
+        airOff();
+        Serial0.printf("AIRBITS refused pressure=%.3fkPa hard=%.3fkPa\n", p, airHardLimitKpa);
+        return false;
+    }
+
+    airManualBits = bits;
+    airManualPumpDutyCommand = pumpDuty;
+    airManualUntilMs = (totalMs == 0) ? 0 : millis() + totalMs;
+    lastAirManualWatchMs = 0;
+    applyAirManualBits(bits, pumpDuty);
+    strlcpy(airMode, "manual", sizeof(airMode));
+    if (totalMs == 0) {
+        Serial0.printf("AIRBITS on bits=%u duty=%u ms=continuous\n", bits, pumpDuty);
+    } else {
+        Serial0.printf("AIRBITS on bits=%u duty=%u ms=%u\n", bits, pumpDuty, totalMs);
+    }
+    printAirStatus();
+    return true;
+}
+
+bool startAirManualBits(uint8_t bits, uint16_t totalMs) {
+    return startAirManualBits(bits, totalMs, airPumpPwmMaxDuty);
+}
+
+void handleAirManualBits() {
+    if (airManualBits == 0) {
+        return;
+    }
+
+    uint32_t now = millis();
+    if (airManualUntilMs != 0 && (int32_t)(now - airManualUntilMs) >= 0) {
+        stopAirManualBits("timeout");
+        return;
+    }
+
+    if (now - lastAirManualWatchMs < airManualWatchMs) {
+        return;
+    }
+    lastAirManualWatchMs = now;
+
+    AirReading reading;
+    if (readAirSensor(reading) && airHardLimitConfirmed(reading.pressureKpa)) {
+        stopAirManualBits("hard-limit");
+    }
+}
+
+void autoIdentifyAirPins() {
+    setupAirPins();
+    saveAirSettings();
+    Serial0.println("AIRAUTOID fixed pump=11 vent=9 aux=10");
+    printAirStatus();
+    return;
+
+    bool wasOn = airControlEnabled;
+    airControlEnabled = false;
+    if (!ensureAirSensor(true)) {
+        Serial0.println("AIRAUTOID failed: sensor not found");
+        airControlEnabled = wasOn;
+        return;
+    }
+
+    float slope[8];
+    uint8_t bestRise = 0;
+    uint8_t bestFall = 0;
+    float maxRise = -1000.0f;
+    float maxFall = 1000.0f;
+
+    for (uint8_t i = 0; i < 8; i++) {
+        slope[i] = NAN;
+    }
+
+    const uint16_t stages[2] = {airDetectPulseMs, airDetectPulseMs2};
+    Serial0.println("AIRAUTOID scanning 9/10/11 output combinations with short safe pulses...");
+    for (uint8_t stage = 0; stage < 2 && maxRise < airIdentifyMinRiseKpa; stage++) {
+        uint16_t pulseMs = stages[stage];
+        maxRise = -1000.0f;
+        maxFall = 1000.0f;
+        bestRise = 0;
+        bestFall = 0;
+        Serial0.printf("AIRAUTOID stage=%u pulse=%ums\n", stage + 1, pulseMs);
+        for (uint8_t bits = 0; bits < 8; bits++) {
+            slope[bits] = measureAirSlopeForBits(bits, pulseMs);
+            Serial0.printf("AIRAUTOID bits=%u pin9=%d pin10=%d pin11=%d delta=%.4fkPa\n",
+                           bits, (bits & 1) ? 1 : 0, (bits & 2) ? 1 : 0, (bits & 4) ? 1 : 0,
+                           slope[bits]);
+            if (!isnan(slope[bits]) && slope[bits] > maxRise) {
+                maxRise = slope[bits];
+                bestRise = bits;
+            }
+            if (!isnan(slope[bits]) && slope[bits] < maxFall) {
+                maxFall = slope[bits];
+                bestFall = bits;
+            }
+            airOff();
+            AirReading guard;
+            if (readAirSensor(guard) && !isnan(guard.pressureKpa)) {
+                if (guard.pressureKpa > airHardLimitKpa) {
+                    pulseAirAction(airDeflate, airAutoDeflatePulseMs);
+                    Serial0.printf("AIRAUTOID stopped: pressure %.3fkPa exceeds hard limit %.3fkPa\n",
+                                   guard.pressureKpa, airHardLimitKpa);
+                    airControlEnabled = wasOn;
+                    return;
+                }
+                if (guard.pressureKpa > airIdentifyAbortKpa) {
+                    Serial0.printf("AIRAUTOID stopped early: pressure %.3fkPa exceeds safe identify limit %.3fkPa\n",
+                                   guard.pressureKpa, airIdentifyAbortKpa);
+                    airControlEnabled = wasOn;
+                    return;
+                }
+            }
+            delay(180);
+        }
+    }
+
+    if (maxRise < airIdentifyMinRiseKpa) {
+        Serial0.println("AIRAUTOID failed: no clear pressure rise. Check pump power/tubing.");
+        airOff();
+        airControlEnabled = wasOn;
+        return;
+    }
+
+    int ventIdx = -1;
+    for (int i = 0; i < 3; i++) {
+        if ((bestFall & (1 << i)) && !(bestRise & (1 << i))) {
+            ventIdx = i;
+            break;
+        }
+    }
+    if (ventIdx < 0) {
+        for (int i = 0; i < 3; i++) {
+            if (bestFall & (1 << i)) {
+                ventIdx = i;
+                break;
+            }
+        }
+    }
+
+    uint8_t chargeNoVent = bestRise;
+    if (ventIdx >= 0) {
+        chargeNoVent &= ~(1 << ventIdx);
+    }
+
+    int pumpIdx = -1;
+    int holdIdx = -1;
+    float biggestLoss = -1000.0f;
+    for (int i = 0; i < 3; i++) {
+        if (!(chargeNoVent & (1 << i))) continue;
+        uint8_t without = bestRise & ~(1 << i);
+        float loss = maxRise - (isnan(slope[without]) ? -1.0f : slope[without]);
+        if (loss > biggestLoss) {
+            biggestLoss = loss;
+            pumpIdx = i;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        if (i != pumpIdx && i != ventIdx && (chargeNoVent & (1 << i))) {
+            holdIdx = i;
+            break;
+        }
+    }
+    if (holdIdx < 0) {
+        for (int i = 0; i < 3; i++) {
+            if (i != pumpIdx && i != ventIdx) {
+                holdIdx = i;
+                break;
+            }
+        }
+    }
+
+    if (pumpIdx < 0 || ventIdx < 0 || holdIdx < 0) {
+        Serial0.println("AIRAUTOID uncertain: use airtest and airmap PUMP VENT HOLD.");
+        airOff();
+        airControlEnabled = wasOn;
+        return;
+    }
+
+    airPumpPin = airCandidatePins[pumpIdx];
+    airVentPin = airCandidatePins[ventIdx];
+    airHoldPin = airCandidatePins[holdIdx];
+    airPinMapConfirmed = true;
+    setupAirPins();
+    saveAirSettings();
+    Serial0.printf("AIRAUTOID OK pump=%d vent=%d hold=%d riseBits=%u fallBits=%u rise=%.4f fall=%.4f\n",
+                   airPumpPin, airVentPin, airHoldPin, bestRise, bestFall, maxRise, maxFall);
+    airControlEnabled = wasOn;
+}
 
 bool coefficientsAreValid(const float coeffs[5]) {
     float minAbs = 1000.0f;
@@ -443,10 +2533,10 @@ void loadCalibration() {
     printCoefficients();
 }
 
-// 新版四点自动校准（左下→左上→右上→右下）
+// 新版四点自动校准（左上→右上→右下→左下）
 void autoCalibrateHome() {
     Serial0.println("\n========== 开始 四点自动校准 ==========");
-    Serial0.println("顺序：左下(0,0) → 左上(0,150) → 右上(150,150) → 右下(150,0)");
+    Serial0.println("顺序：左上(0,150) → 右上(150,150) → 右下(150,0) → 左下(0,0)");
 
     allEnable(true);
     delay(300);
@@ -584,16 +2674,22 @@ float currentY = L0 * 0.5f;
 bool currentXYValid = false;
 
 MotorTargets calcMotorTargets(float X, float Y) {
-    ropeLength[1] = sqrt(X * X + Y * Y);
-    ropeLength[2] = sqrt(X * X + (L0 - Y) * (L0 - Y));
-    ropeLength[3] = sqrt((L0 - X) * (L0 - X) + (L0 - Y) * (L0 - Y));
-    ropeLength[4] = sqrt((L0 - X) * (L0 - X) + Y * Y);
+    // Real motor layout:
+    // M1 = left top, M2 = right top, M3 = right bottom, M4 = left bottom.
+    ropeLength[1] = sqrt(X * X + (L0 - Y) * (L0 - Y));
+    ropeLength[2] = sqrt((L0 - X) * (L0 - X) + (L0 - Y) * (L0 - Y));
+    ropeLength[3] = sqrt((L0 - X) * (L0 - X) + Y * Y);
+    ropeLength[4] = sqrt(X * X + Y * Y);
 
     MotorTargets target;
-    target.m1 = ropeLength[1] * realDeg2mm[1];
-    target.m2 = ropeLength[2] * realDeg2mm[2];
-    target.m3 = ropeLength[3] * realDeg2mm[3];
-    target.m4 = ropeLength[4] * realDeg2mm[4];
+    float l1 = max(0.0f, ropeLength[1] - ropeTensionOffsetMm - motorTensionTrimMm[1]);
+    float l2 = max(0.0f, ropeLength[2] - ropeTensionOffsetMm - motorTensionTrimMm[2]);
+    float l3 = max(0.0f, ropeLength[3] - ropeTensionOffsetMm - motorTensionTrimMm[3]);
+    float l4 = max(0.0f, ropeLength[4] - ropeTensionOffsetMm - motorTensionTrimMm[4]);
+    target.m1 = l1 * realDeg2mm[1];
+    target.m2 = l2 * realDeg2mm[2];
+    target.m3 = l3 * realDeg2mm[3];
+    target.m4 = l4 * realDeg2mm[4];
     return target;
 }
 
@@ -620,7 +2716,7 @@ void moveToXY(float X, float Y, bool ensureEnabled = true, bool verbose = true) 
     MotorTargets target = calcMotorTargets(X, Y);
 
     if (verbose) {
-        Serial0.printf("目标(%.1f,%.1f) | ", X, Y);
+        Serial0.printf("目标(%.1f,%.1f) tension=%.1fmm | ", X, Y, ropeTensionOffsetMm);
     }
 
     if (ensureEnabled) {
@@ -631,6 +2727,18 @@ void moveToXY(float X, float Y, bool ensureEnabled = true, bool verbose = true) 
     currentX = X;
     currentY = Y;
     currentXYValid = true;
+
+    if (cableCurrentFeedbackEnabled && cableMotorsEnabled && !isWebPlaybackActive()) {
+        cableMoveCounter++;
+        uint32_t now = millis();
+        uint16_t feedbackPeriod = cableFeedbackMinPeriodMs;
+        if (cableMoveCounter >= cableFeedbackMoveInterval &&
+            (lastCableFeedbackMs == 0 || now - lastCableFeedbackMs >= feedbackPeriod)) {
+            cableMoveCounter = 0;
+            lastCableFeedbackMs = now;
+            updateCableTensionFeedback(false);
+        }
+    }
 }
 
 void lineToXY(float toX, float toY, float segmentMm = pathSegmentMm, uint16_t delayMs = pathPointDelayMs) {
@@ -786,8 +2894,9 @@ struct WebPathPoint {
 const int maxWebPathPoints = 200000;
 const float webResampleMm = 0.5f;
 const float webTravelResampleMm = 1.5f;
-const uint16_t minWebStepDelayMs = 8;
-const uint16_t maxWebStepDelayMs = 80;
+const uint16_t minWebStepDelayMs = 3;
+const uint16_t maxWebStepDelayMs = 34;
+const float minWebPlaybackSpacingMm = 0.12f;
 
 WebPathPoint *webPath = nullptr;
 int webPathPointCount = 0;
@@ -822,6 +2931,10 @@ uint8_t usbBinaryBuf[5] = {0};
 uint8_t usbBinaryBufIndex = 0;
 float usbPathPrevX = 0.0f;
 float usbPathPrevY = 0.0f;
+
+bool isWebPlaybackActive() {
+    return webPlaybackActive;
+}
 
 bool ensureWebPathBuffer() {
     if (webPath) {
@@ -869,6 +2982,15 @@ input[type=range]{width:100%;accent-color:#111}
 input[type=file]{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
 #status{min-height:22px;margin-top:10px;font-size:14px;color:#333}
 #coef{min-height:42px;margin-top:6px;font-size:13px;line-height:1.45;color:#111;white-space:pre-wrap}
+.airbox{margin-top:16px;padding:12px;border:1px solid #d9dde5;border-radius:8px;background:#fff}
+.airgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;line-height:1.35}
+.airvolt{font-size:28px;font-weight:800;margin-bottom:6px}
+#airChart{width:100%;height:96px;border:1px solid #d9dde5;border-radius:8px;background:#fff;margin-top:8px;display:block}
+.airbtn{background:#0f766e}
+.airbtn.active{outline:3px solid #99f6e4}
+.airoff{background:#4b5563}
+.manualair{background:#155e75}
+.manualair.fast{background:#7c2d12}
 </style>
 </head>
 <body>
@@ -899,6 +3021,16 @@ input[type=file]{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
   <span id="travelSpeedText">15</span>
 </div>
 <div class="speed">
+  <span>电流</span>
+  <input id="motionCurrent" type="range" min="300" max="2200" step="50" value="1000">
+  <span id="motionCurrentText">1000</span>
+</div>
+<div class="speed">
+  <span>拉紧</span>
+  <input id="tension" type="range" min="0" max="12" step="0.5" value="3">
+  <span id="tensionText">3</span>
+</div>
+<div class="speed">
   <span>保持</span>
   <input id="baseTorque" type="range" min="20" max="300" step="5" value="80">
   <span id="baseTorqueText">80</span>
@@ -907,6 +3039,27 @@ input[type=file]{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
   <span>校准</span>
   <input id="pullTorque" type="range" min="300" max="1500" step="10" value="900">
   <span id="pullTorqueText">900</span>
+</div>
+<div class="airbox">
+  <div class="airvolt"><span id="airVolt">--</span> V</div>
+  <div class="airgrid">
+    <div>气压: <b id="airPressure">--</b></div>
+    <div>控制: <b id="airOnText">--</b></div>
+    <div>模式: <b id="airModeText">--</b></div>
+    <div>PWM: <b id="airDutyText">--</b></div>
+  </div>
+  <canvas id="airChart" width="520" height="150"></canvas>
+  <div class="speed">
+    <span>充气PWM</span>
+    <input id="airManualPwm" type="range" min="0" max="255" value="140">
+    <span id="airManualPwmText">140</span>
+  </div>
+  <div class="controls extra">
+    <button id="airManualInflateBtn" class="manualair">手动充气</button>
+    <button id="airManualSlowBtn" class="manualair">慢放气</button>
+    <button id="airManualFastBtn" class="manualair fast">快放气</button>
+    <button id="airManualStopBtn" class="airoff">停止手动</button>
+  </div>
 </div>
 <div id="status"></div>
 <div id="coef"></div>
@@ -920,12 +3073,25 @@ const speed=document.getElementById('speed');
 const speedText=document.getElementById('speedText');
 const travelSpeed=document.getElementById('travelSpeed');
 const travelSpeedText=document.getElementById('travelSpeedText');
+const motionCurrent=document.getElementById('motionCurrent');
+const motionCurrentText=document.getElementById('motionCurrentText');
 const baseTorque=document.getElementById('baseTorque');
 const baseTorqueText=document.getElementById('baseTorqueText');
 const pullTorque=document.getElementById('pullTorque');
 const pullTorqueText=document.getElementById('pullTorqueText');
+const tension=document.getElementById('tension');
+const tensionText=document.getElementById('tensionText');
 const modeBtn=document.getElementById('mode');
 const coefEl=document.getElementById('coef');
+const airVoltEl=document.getElementById('airVolt');
+const airPressureEl=document.getElementById('airPressure');
+const airOnTextEl=document.getElementById('airOnText');
+const airModeTextEl=document.getElementById('airModeText');
+const airDutyTextEl=document.getElementById('airDutyText');
+const airChart=document.getElementById('airChart');
+const airCtx=airChart.getContext('2d');
+const airManualPwm=document.getElementById('airManualPwm');
+const airManualPwmText=document.getElementById('airManualPwmText');
 let drawing=false;
 let strokes=[];
 let activeStroke=null;
@@ -934,6 +3100,7 @@ let ricePresetSelected=false;
 let lastBoardPathVersion=-1;
 const ricePresetPointCount=18000;
 let cssSize=0;
+let airSamples=[];
 
 function fitCanvas(){
   const r=pad.getBoundingClientRect();
@@ -1115,7 +3282,74 @@ function renderCoef(s){
   if(!s || !Number.isFinite(s.m1))return;
   coefEl.textContent=
     `M1: ${s.m1.toFixed(3)} deg/mm  M2: ${s.m2.toFixed(3)} deg/mm\n`+
-    `M3: ${s.m3.toFixed(3)} deg/mm  M4: ${s.m4.toFixed(3)} deg/mm`;
+    `M3: ${s.m3.toFixed(3)} deg/mm  M4: ${s.m4.toFixed(3)} deg/mm\n`+
+    `拉紧补偿: ${Number(s.tension||0).toFixed(1)} mm`;
+}
+
+function applyAirStatus(s){
+  if(!s)return;
+  const p=Number(s.airPressure);
+  const stable=Number(s.airStable);
+  const v=Number(s.airVolt);
+  const duty=Number(s.airDuty);
+  if(Number.isFinite(v))airVoltEl.textContent=v.toFixed(3);
+  airPressureEl.textContent=(Number.isFinite(p)?p.toFixed(3):'--')+' / '+(Number.isFinite(stable)?stable.toFixed(3):'--')+' kPa';
+  airOnTextEl.textContent=s.airOn?'开':'关';
+  airModeTextEl.textContent=s.airMode||'--';
+  airDutyTextEl.textContent=Number.isFinite(duty)?String(duty):'--';
+  if(Number.isFinite(p)||Number.isFinite(stable)){
+    airSamples.push({p:Number.isFinite(stable)?stable:p,raw:Number.isFinite(p)?p:stable});
+    while(airSamples.length>360)airSamples.shift();
+  }
+}
+
+function drawAirChart(){
+  const w=airChart.width,h=airChart.height;
+  airCtx.clearRect(0,0,w,h);
+  airCtx.fillStyle='#fff';
+  airCtx.fillRect(0,0,w,h);
+  airCtx.strokeStyle='#e0e4ea';
+  airCtx.lineWidth=1;
+  for(let i=0;i<=3;i++){
+    const y=12+i*(h-24)/3;
+    airCtx.beginPath();airCtx.moveTo(34,y);airCtx.lineTo(w-8,y);airCtx.stroke();
+  }
+  const data=airSamples.slice(-180);
+  if(data.length<2){
+    airCtx.fillStyle='#666';
+    airCtx.font='12px system-ui';
+    airCtx.fillText('等待气压数据',40,28);
+    return;
+  }
+  const vals=[];
+  for(const s of data){
+    ['p','raw','target','min','max'].forEach(k=>{if(Number.isFinite(s[k]))vals.push(s[k]);});
+  }
+  let lo=Math.min(...vals),hi=Math.max(...vals);
+  if(!Number.isFinite(lo)||!Number.isFinite(hi)||hi-lo<0.2){lo-=0.1;hi+=0.1;}
+  lo-=0.08;hi+=0.08;
+  const xOf=i=>34+i*(w-42)/(data.length-1);
+  const yOf=v=>h-12-(v-lo)*(h-24)/(hi-lo);
+  const last=data[data.length-1];
+  if(Number.isFinite(last.min)&&Number.isFinite(last.max)){
+    airCtx.fillStyle='rgba(245,158,11,0.16)';
+    const a=yOf(last.max),b=yOf(last.min);
+    airCtx.fillRect(34,Math.min(a,b),w-42,Math.abs(b-a));
+  }
+  if(Number.isFinite(last.target)){
+    airCtx.strokeStyle='#1d4ed8';
+    airCtx.lineWidth=2;
+    airCtx.beginPath();airCtx.moveTo(34,yOf(last.target));airCtx.lineTo(w-8,yOf(last.target));airCtx.stroke();
+  }
+  airCtx.strokeStyle='#0f766e';
+  airCtx.lineWidth=2;
+  airCtx.beginPath();
+  data.forEach((s,i)=>{const x=xOf(i),y=yOf(s.p);if(i===0)airCtx.moveTo(x,y);else airCtx.lineTo(x,y);});
+  airCtx.stroke();
+  airCtx.fillStyle='#555';
+  airCtx.font='11px system-ui';
+  airCtx.fillText(hi.toFixed(2),4,16);
+  airCtx.fillText(lo.toFixed(2),4,h-12);
 }
 
 async function sendMode(){
@@ -1138,6 +3372,14 @@ async function loadStatus(){
       travelSpeed.value=s.travelSpeed;
       travelSpeedText.textContent=s.travelSpeed;
     }
+    if(Number.isFinite(s.motionCurrent)){
+      motionCurrent.value=s.motionCurrent;
+      motionCurrentText.textContent=s.motionCurrent;
+    }
+    if(Number.isFinite(s.tension)){
+      tension.value=s.tension;
+      tensionText.textContent=s.tension.toFixed(1).replace(/\.0$/,'');
+    }
     if(Number.isFinite(s.baseTorque)){
       baseTorque.value=s.baseTorque;
       baseTorqueText.textContent=s.baseTorque;
@@ -1149,6 +3391,7 @@ async function loadStatus(){
     loopMode=!!s.loop;
     setModeButton();
     renderCoef(s);
+    applyAirStatus(s);
     await syncBoardPath(s);
     if(statusEl.textContent==='')statusEl.textContent='已连接';
   }catch(e){
@@ -1565,6 +3808,20 @@ travelSpeed.oninput=()=>{
   travelSpeedTimer=setTimeout(()=>post('/travelSpeed?value='+encodeURIComponent(travelSpeed.value)),250);
 };
 
+let motionCurrentTimer=0;
+motionCurrent.oninput=()=>{
+  motionCurrentText.textContent=motionCurrent.value;
+  clearTimeout(motionCurrentTimer);
+  motionCurrentTimer=setTimeout(()=>post('/motionCurrent?value='+encodeURIComponent(motionCurrent.value)),250);
+};
+
+let tensionTimer=0;
+tension.oninput=()=>{
+  tensionText.textContent=Number(tension.value).toFixed(1).replace(/\.0$/,'');
+  clearTimeout(tensionTimer);
+  tensionTimer=setTimeout(()=>post('/tension?value='+encodeURIComponent(tension.value)),250);
+};
+
 let baseTorqueTimer=0;
 baseTorque.oninput=()=>{
   baseTorqueText.textContent=baseTorque.value;
@@ -1579,16 +3836,61 @@ pullTorque.oninput=()=>{
   pullTorqueTimer=setTimeout(()=>post('/calibrationTorque?pull='+encodeURIComponent(pullTorque.value)),250);
 };
 
+airManualPwm.oninput=()=>{
+  airManualPwmText.textContent=airManualPwm.value;
+};
+
+async function manualAir(bits,duty){
+  try{
+    const url='/air?action=manual&bits='+encodeURIComponent(bits)+'&ms=0&duty='+encodeURIComponent(duty);
+    statusEl.textContent=await post(url);
+    const s=await fetchStatus(1200);
+    applyAirStatus(s);
+  }catch(e){
+    statusEl.textContent='手动调气失败';
+  }
+}
+
+document.getElementById('airManualInflateBtn').onclick=()=>{
+  manualAir(4,airManualPwm.value);
+};
+document.getElementById('airManualSlowBtn').onclick=()=>{
+  manualAir(1,0);
+};
+document.getElementById('airManualFastBtn').onclick=()=>{
+  manualAir(3,0);
+};
+document.getElementById('airManualStopBtn').onclick=async()=>{
+  try{
+    statusEl.textContent=await post('/air?action=manualoff');
+    const s=await fetchStatus(1200);
+    applyAirStatus(s);
+  }catch(e){
+    statusEl.textContent='停止手动失败';
+  }
+};
+
+async function refreshAirStatus(){
+  try{
+    const s=await fetchStatus(1000);
+    applyAirStatus(s);
+  }catch(e){}
+}
+
 window.addEventListener('resize',fitCanvas);
 fitCanvas();
+drawAirChart();
 loadStatus();
 setInterval(async()=>{
   try{
     const s=await fetchStatus(1200);
     renderCoef(s);
+    applyAirStatus(s);
     await syncBoardPath(s);
   }catch(e){}
 },3000);
+setInterval(refreshAirStatus,250);
+setInterval(drawAirChart,10);
 </script>
 </body>
 </html>
@@ -1604,6 +3906,16 @@ uint16_t webTravelStepDelayMs() {
     return maxWebStepDelayMs - ((maxWebStepDelayMs - minWebStepDelayMs) * (speed - 1)) / 99;
 }
 
+uint16_t webDistanceDelayMs(float distanceMm, bool travel) {
+    uint8_t percent = travel ? webTravelSpeedPercent : webSpeedPercent;
+    float mmPerSecond = travel
+        ? (8.0f + percent * 0.65f)
+        : (12.0f + percent * 1.05f);
+    float delayMs = (distanceMm / max(mmPerSecond, 1.0f)) * 1000.0f;
+    uint16_t nominal = travel ? webTravelStepDelayMs() : webStepDelayMs();
+    return (uint16_t)constrain((int)lroundf(delayMs), (int)minWebStepDelayMs, (int)max((int)nominal, (int)minWebStepDelayMs));
+}
+
 void saveWebSettings() {
     Preferences prefs;
     if (!prefs.begin(calibrationNamespace, false)) {
@@ -1613,12 +3925,24 @@ void saveWebSettings() {
 
     prefs.putUInt("drawSpd", webSpeedPercent);
     prefs.putUInt("travelSpd", webTravelSpeedPercent);
+    prefs.putUInt("moveCur", motionCurrentMa);
+    prefs.putFloat("tensionMm", ropeTensionOffsetMm);
     prefs.putUInt("calBase", calibrationBaseCurrent);
     prefs.putUInt("calPull", calibrationPullCurrent);
+    prefs.putBool("fbOn", cableCurrentFeedbackEnabled);
+    prefs.putUInt("fbLow", cableLowCurrentMa);
+    prefs.putUInt("fbHigh", cableHighCurrentMa);
+    prefs.putFloat("fbUp", cableTensionTrimUpMm);
+    prefs.putFloat("fbDown", cableTensionTrimDownMm);
+    prefs.putFloat("fbMax", maxMotorTensionTrimMm);
+    prefs.putUInt("fbInt", cableFeedbackMoveInterval);
     prefs.end();
-    Serial0.printf("Web settings saved: draw=%u travel=%u calBase=%d calPull=%d\n",
+    Serial0.printf("Web settings saved: draw=%u travel=%u current=%u tension=%.1f calBase=%d calPull=%d\n",
                    webSpeedPercent, webTravelSpeedPercent,
+                   motionCurrentMa,
+                   ropeTensionOffsetMm,
                    calibrationBaseCurrent, calibrationPullCurrent);
+    printTensionFeedbackConfig();
 }
 
 void loadWebSettings() {
@@ -1630,13 +3954,27 @@ void loadWebSettings() {
 
     webSpeedPercent = (uint8_t)constrain((int)prefs.getUInt("drawSpd", webSpeedPercent), 1, 100);
     webTravelSpeedPercent = (uint8_t)constrain((int)prefs.getUInt("travelSpd", webTravelSpeedPercent), 1, 100);
+    motionCurrentMa = (uint16_t)constrain((int)prefs.getUInt("moveCur", motionCurrentMa),
+                                          (int)minMotionCurrentMa, (int)maxMotionCurrentMa);
+    ropeTensionOffsetMm = constrain(prefs.getFloat("tensionMm", ropeTensionOffsetMm),
+                                    0.0f, maxRopeTensionOffsetMm);
     calibrationBaseCurrent = constrain((int)prefs.getUInt("calBase", calibrationBaseCurrent), 20, 300);
     calibrationPullCurrent = constrain((int)prefs.getUInt("calPull", calibrationPullCurrent), 300, 1500);
+    cableCurrentFeedbackEnabled = prefs.getBool("fbOn", cableCurrentFeedbackEnabled);
+    cableLowCurrentMa = constrain((int)prefs.getUInt("fbLow", cableLowCurrentMa), 1, 3000);
+    cableHighCurrentMa = constrain((int)prefs.getUInt("fbHigh", cableHighCurrentMa), cableLowCurrentMa + 1, 4000);
+    cableTensionTrimUpMm = constrain(prefs.getFloat("fbUp", cableTensionTrimUpMm), 0.0f, 2.0f);
+    cableTensionTrimDownMm = constrain(prefs.getFloat("fbDown", cableTensionTrimDownMm), 0.0f, 2.0f);
+    maxMotorTensionTrimMm = constrain(prefs.getFloat("fbMax", maxMotorTensionTrimMm), 0.0f, 10.0f);
+    cableFeedbackMoveInterval = (uint8_t)constrain((int)prefs.getUInt("fbInt", cableFeedbackMoveInterval), 1, 100);
     prefs.end();
 
-    Serial0.printf("Loaded web settings: draw=%u travel=%u calBase=%d calPull=%d\n",
+    Serial0.printf("Loaded web settings: draw=%u travel=%u current=%u tension=%.1f calBase=%d calPull=%d\n",
                    webSpeedPercent, webTravelSpeedPercent,
+                   motionCurrentMa,
+                   ropeTensionOffsetMm,
                    calibrationBaseCurrent, calibrationPullCurrent);
+    printTensionFeedbackConfig();
 }
 
 void stopWebPlayback(bool disableMotors) {
@@ -2093,6 +4431,31 @@ void handleTravelSpeedChange() {
     webServer.send(200, "text/plain; charset=utf-8", "移动速度 " + String(webTravelSpeedPercent));
 }
 
+void handleMotionCurrentChange() {
+    if (webServer.hasArg("value")) {
+        uint16_t newCurrent = (uint16_t)constrain(webServer.arg("value").toInt(),
+                                                  (int)minMotionCurrentMa, (int)maxMotionCurrentMa);
+        if (newCurrent != motionCurrentMa) {
+            motionCurrentMa = newCurrent;
+            saveWebSettings();
+        }
+    }
+    Serial0.printf("Motion current limit: %u mA\n", motionCurrentMa);
+    webServer.send(200, "text/plain; charset=utf-8", "电机电流 " + String(motionCurrentMa) + " mA");
+}
+
+void handleTensionChange() {
+    if (webServer.hasArg("value")) {
+        float newTension = constrain(webServer.arg("value").toFloat(), 0.0f, maxRopeTensionOffsetMm);
+        if (fabs(newTension - ropeTensionOffsetMm) > 0.01f) {
+            ropeTensionOffsetMm = newTension;
+            saveWebSettings();
+        }
+    }
+    Serial0.printf("Rope tension offset: %.1f mm\n", ropeTensionOffsetMm);
+    webServer.send(200, "text/plain; charset=utf-8", "拉紧补偿 " + String(ropeTensionOffsetMm, 1) + " mm");
+}
+
 void handleCalibrationTorqueChange() {
     bool changed = false;
 
@@ -2127,7 +4490,8 @@ void handleSaveSettings() {
     saveWebSettings();
     webServer.send(200, "text/plain; charset=utf-8",
                    "参数已保存: 绘制 " + String(webSpeedPercent) +
-                   ", 移动 " + String(webTravelSpeedPercent));
+                   ", 移动 " + String(webTravelSpeedPercent) +
+                   ", 拉紧 " + String(ropeTensionOffsetMm, 1) + "mm");
 }
 
 void handleResetSettings() {
@@ -2135,6 +4499,8 @@ void handleResetSettings() {
     resetCalibrationToDefaults();
     webSpeedPercent = 50;
     webTravelSpeedPercent = 15;
+    motionCurrentMa = defaultMotionCurrentMa;
+    ropeTensionOffsetMm = defaultRopeTensionOffsetMm;
     calibrationBaseCurrent = defaultCalibrationBaseCurrent;
     calibrationPullCurrent = defaultCalibrationPullCurrent;
     saveCalibration();
@@ -2174,7 +4540,136 @@ void handleCalibrateRequest() {
     webServer.send(200, "text/plain; charset=utf-8", "校准已开始，请等待完成");
 }
 
+String jsonFloat(float value, uint8_t decimals) {
+    if (isnan(value) || value > 1.0e20f || value < -1.0e20f) {
+        return "null";
+    }
+    return String(value, (unsigned int)decimals);
+}
+
+void handleAirRequest() {
+    String action = webServer.arg("action");
+    action.toLowerCase();
+
+    if (action == "scan") {
+        findAirSensor(true);
+    } else if (action == "adc") {
+        scanAirAnalogPins();
+    } else if (action == "adcpin") {
+        int pin = webServer.arg("pin").toInt();
+        if (!airAnalogPinAllowed(pin)) {
+            webServer.send(400, "text/plain; charset=utf-8", "bad adc pin");
+            return;
+        }
+        airAnalogPin = pin;
+        analogSetPinAttenuation(airAnalogPin, ADC_11db);
+        pinMode(airAnalogPin, INPUT);
+        saveAirSettings();
+    } else if (action == "read" || action == "status") {
+        ensureAirSensor(true);
+    } else if (action == "zero") {
+        if (!calibrateAirZero()) {
+            webServer.send(500, "text/plain; charset=utf-8", "air zero failed");
+            return;
+        }
+    } else if (action == "on") {
+        if (ensureAirSensor(true)) {
+            if (!isnan(airPressureKpa) && airPressureKpa > airHardLimitKpa) {
+                pulseAirAction(airDeflate, airAutoDeflatePulseMs);
+                airControlEnabled = false;
+                printAirStatus();
+                webServer.send(409, "text/plain; charset=utf-8", "air hard limit");
+                return;
+            }
+            beginAirControl();
+        }
+    } else if (action == "off") {
+        airControlEnabled = false;
+        airOff();
+    } else if (action == "inflate") {
+        airControlEnabled = false;
+        pulseAirAction(airInflate, airManualInflatePulseMs);
+    } else if (action == "deflate") {
+        airControlEnabled = false;
+        pulseAirAction(airDeflate, airManualDeflatePulseMs);
+    } else if (action == "keep") {
+        airControlEnabled = false;
+        airKeep();
+    } else if (action == "autoid") {
+        autoIdentifyAirPins();
+    } else if (action == "test") {
+        runAirPinTest();
+    } else if (action == "probe") {
+        int bits = webServer.arg("bits").toInt();
+        int ms = webServer.hasArg("ms") ? webServer.arg("ms").toInt() : airProbeMaxMs;
+        if (bits < 0 || bits > 7) {
+            webServer.send(400, "text/plain; charset=utf-8", "bad probe bits");
+            return;
+        }
+        safeAirProbeBits((uint8_t)bits, (uint16_t)ms);
+    } else if (action == "manual") {
+        int bits = webServer.arg("bits").toInt();
+        int ms = webServer.hasArg("ms") ? webServer.arg("ms").toInt() : 0;
+        int duty = webServer.hasArg("duty") ? webServer.arg("duty").toInt() : airPumpPwmMaxDuty;
+        if (bits < 0 || bits > 7) {
+            webServer.send(400, "text/plain; charset=utf-8", "bad manual bits");
+            return;
+        }
+        if (!startAirManualBits((uint8_t)bits, (uint16_t)ms, (uint8_t)constrain(duty, 0, 255))) {
+            webServer.send(500, "text/plain; charset=utf-8", "manual air failed");
+            return;
+        }
+    } else if (action == "manualoff") {
+        stopAirManualBits("web");
+    } else if (action == "range") {
+        float mn = webServer.arg("min").toFloat();
+        float mx = webServer.arg("max").toFloat();
+        if (validAirRange(mn, mx)) {
+            airMinKpa = mn;
+            airMaxKpa = mx;
+            if (airSelectedGear >= 1 && airSelectedGear <= airGearCount) {
+                airGearMin[airSelectedGear - 1] = mn;
+                airGearMax[airSelectedGear - 1] = mx;
+            }
+            saveAirSettings();
+        }
+    } else if (action == "gear") {
+        int gear = webServer.arg("gear").toInt();
+        if (gear < 1 || gear > airGearCount) {
+            webServer.send(400, "text/plain; charset=utf-8", "bad air gear");
+            return;
+        }
+        applyAirGear((uint8_t)gear);
+        saveAirSettings();
+    } else if (action == "map") {
+        setupAirPins();
+        saveAirSettings();
+    } else {
+        webServer.send(400, "text/plain; charset=utf-8", "bad air action");
+        return;
+    }
+
+    printAirStatus();
+    webServer.send(200, "text/plain; charset=utf-8",
+                   "air on=" + String(airControlEnabled ? 1 : 0) +
+                   " ok=" + String(airSensorOnline ? 1 : 0) +
+                   " p=" + jsonFloat(airPressureKpa, 3) +
+                   " stable=" + jsonFloat(airStableKpa, 3) +
+                   " gear=" + String(airSelectedGear) +
+                   " mode=" + String(airMode) +
+                   " target=" + jsonFloat(airPressureTargetKpa(), 3) +
+                   " min=" + String(airMinKpa, 2) +
+                   " max=" + String(airMaxKpa, 2) +
+                   " duty=" + String(airPumpDutyCommand) +
+                   " v=" + jsonFloat(airSensorVoltage, 3));
+}
+
 void handleStatus() {
+    if (airSensorOnline) {
+        AirReading reading;
+        readAirSensor(reading);
+    }
+
     String json = "{\"points\":" + String(webPathPointCount) +
                   ",\"strokes\":" + String(webStrokeCount) +
                   ",\"pathVersion\":" + String(webPathVersion) +
@@ -2183,10 +4678,37 @@ void handleStatus() {
                   ",\"loop\":" + String(webLoopPlayback ? "true" : "false") +
                   ",\"speed\":" + String(webSpeedPercent) +
                   ",\"travelSpeed\":" + String(webTravelSpeedPercent) +
+                  ",\"motionCurrent\":" + String(motionCurrentMa) +
+                  ",\"tension\":" + String(ropeTensionOffsetMm, 1) +
                   ",\"baseTorque\":" + String(calibrationBaseCurrent) +
                   ",\"pullTorque\":" + String(calibrationPullCurrent) +
                   ",\"calibrating\":" + String(webCalibrationRunning || webCalibrationRequested ? "true" : "false") +
                   ",\"calibrated\":" + String(webCalibrationDone ? "true" : "false") +
+                  ",\"airOn\":" + String(airControlEnabled ? "true" : "false") +
+                  ",\"airOk\":" + String(airSensorOnline ? "true" : "false") +
+                  ",\"airMap\":" + String(airPinMapConfirmed ? "true" : "false") +
+                  ",\"airMode\":\"" + String(airMode) + "\"" +
+                  ",\"airGear\":" + String(airSelectedGear) +
+                  ",\"airPressure\":" + jsonFloat(airPressureKpa, 3) +
+                  ",\"airStable\":" + jsonFloat(airStableKpa, 3) +
+                  ",\"airFiltered\":" + jsonFloat(airFilteredKpa, 3) +
+                  ",\"airTarget\":" + jsonFloat(airPressureTargetKpa(), 3) +
+                  ",\"airDuty\":" + String(airPumpDutyCommand) +
+                  ",\"airPid\":" + jsonFloat(airPidOutput, 3) +
+                  ",\"airEst\":" + jsonFloat(airPidEstimateKpa, 3) +
+                  ",\"airSettleMs\":" + String(airSettleRemainingMs()) +
+                  ",\"airVolt\":" + jsonFloat(airSensorVoltage, 3) +
+                  ",\"airZero\":" + jsonFloat(airZeroVoltage, 3) +
+                  ",\"airTemp\":" + jsonFloat(airTemperatureC, 2) +
+                  ",\"airAdc\":" + String(airAnalogPin) +
+                  ",\"airMin\":" + String(airMinKpa, 2) +
+                  ",\"airMax\":" + String(airMaxKpa, 2) +
+                  ",\"airPump\":" + String(airPumpPin) +
+                  ",\"airVent\":" + String(airVentPin) +
+                  ",\"airHold\":" + String(airHoldPin) +
+                  ",\"airSda\":" + String(airSdaPin) +
+                  ",\"airScl\":" + String(airSclPin) +
+                  ",\"airAddr\":" + String(airSensorAddress) +
                   ",\"m1\":" + String(realDeg2mm[1], 3) +
                   ",\"m2\":" + String(realDeg2mm[2], 3) +
                   ",\"m3\":" + String(realDeg2mm[3], 3) +
@@ -2264,12 +4786,15 @@ void setupWebPortal() {
     webServer.on("/stop", HTTP_POST, handleStopPlayback);
     webServer.on("/speed", HTTP_POST, handleSpeedChange);
     webServer.on("/travelSpeed", HTTP_POST, handleTravelSpeedChange);
+    webServer.on("/motionCurrent", HTTP_POST, handleMotionCurrentChange);
+    webServer.on("/tension", HTTP_POST, handleTensionChange);
     webServer.on("/calibrationTorque", HTTP_POST, handleCalibrationTorqueChange);
     webServer.on("/saveSettings", HTTP_POST, handleSaveSettings);
     webServer.on("/resetSettings", HTTP_POST, handleResetSettings);
     webServer.on("/mode", HTTP_POST, handleModeChange);
     webServer.on("/clear", HTTP_POST, handleClearPath);
     webServer.on("/calibrate", HTTP_POST, handleCalibrateRequest);
+    webServer.on("/air", HTTP_POST, handleAirRequest);
     webServer.on("/status", HTTP_GET, handleStatus);
     webServer.on("/pathPreview", HTTP_GET, handlePathPreview);
 
@@ -2342,6 +4867,7 @@ void handleWebPlayback() {
         float t = (float)webTravelStep / webTravelSteps;
         float x = webTravelFromX + (webTravelToX - webTravelFromX) * t;
         float y = webTravelFromY + (webTravelToY - webTravelFromY) * t;
+        float stepDistance = currentXYValid ? sqrt((x - currentX) * (x - currentX) + (y - currentY) * (y - currentY)) : webTravelResampleMm;
         moveToXY(x, y, false, false);
 
         if (webTravelStep >= webTravelSteps) {
@@ -2349,7 +4875,7 @@ void handleWebPlayback() {
             webPlaybackIndex++;
         }
 
-        nextWebStepAt = millis() + webTravelStepDelayMs();
+        nextWebStepAt = millis() + webDistanceDelayMs(max(stepDistance, webTravelResampleMm), true);
         return;
     }
 
@@ -2358,7 +4884,7 @@ void handleWebPlayback() {
         return;
     }
 
-    WebPathPoint &point = webPath[webPlaybackIndex];
+    WebPathPoint point = webPath[webPlaybackIndex];
     float x = point.x100 * 0.01f;
     float y = point.y100 * 0.01f;
 
@@ -2369,6 +4895,13 @@ void handleWebPlayback() {
         float dy = y - fromY;
         float distance = sqrt(dx * dx + dy * dy);
 
+        if (distance < 0.05f) {
+            moveToXY(x, y, false, false);
+            webPlaybackIndex++;
+            nextWebStepAt = millis() + 1;
+            return;
+        }
+
         webTravelFromX = fromX;
         webTravelFromY = fromY;
         webTravelToX = x;
@@ -2377,21 +4910,235 @@ void handleWebPlayback() {
         webTravelStep = 0;
         webTravelActive = true;
         nextWebStepAt = 0;
-        Serial0.printf("Web travel to (%.1f,%.1f): steps=%d speed=%u delay=%u ms\n",
-                       x, y, webTravelSteps, webTravelSpeedPercent, webTravelStepDelayMs());
         return;
     }
 
+    float drawDistance = currentXYValid
+        ? sqrt((x - currentX) * (x - currentX) + (y - currentY) * (y - currentY))
+        : minWebPlaybackSpacingMm;
     moveToXY(x, y, false, false);
     webPlaybackIndex++;
-    nextWebStepAt = millis() + webStepDelayMs();
+    nextWebStepAt = millis() + webDistanceDelayMs(max(drawDistance, minWebPlaybackSpacingMm), false);
 }
 
 // 调试指令扩展
+bool parseNameValueCommand(const String &s, const char *prefix, String &name, float &value) {
+    int start = strlen(prefix);
+    if ((int)s.length() <= start || s.charAt(start) != ' ') {
+        return false;
+    }
+
+    String rest = s.substring(start + 1);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp < 0) {
+        name = rest;
+        value = NAN;
+        return true;
+    }
+
+    name = rest.substring(0, sp);
+    name.trim();
+    String valueText = rest.substring(sp + 1);
+    valueText.trim();
+    value = valueText.toFloat();
+    return name.length() > 0 && valueText.length() > 0;
+}
+
+bool setAirParamByName(String name, float value) {
+    name.toLowerCase();
+    if (!isfinite(value)) {
+        return false;
+    }
+
+    if (name == "inflate" || name == "inf") {
+        airAutoInflatePulseMs = (uint16_t)lroundf(value);
+    } else if (name == "deflate" || name == "def") {
+        airAutoDeflatePulseMs = (uint16_t)lroundf(value);
+    } else if (name == "manualinflate" || name == "maninf") {
+        airManualInflatePulseMs = (uint16_t)lroundf(value);
+    } else if (name == "manualdeflate" || name == "mandef") {
+        airManualDeflatePulseMs = (uint16_t)lroundf(value);
+    } else if (name == "deflatemax" || name == "defmax") {
+        airAutoDeflatePulseMaxMs = (uint16_t)lroundf(value);
+    } else if (name == "period") {
+        airControlPeriodMs = (uint16_t)lroundf(value);
+    } else if (name == "inflatesettle" || name == "infsettle") {
+        airInflateSettleMs = (uint16_t)lroundf(value);
+    } else if (name == "deflatesettle" || name == "defsettle") {
+        airDeflateSettleMs = (uint16_t)lroundf(value);
+    } else if (name == "transient") {
+        airTransientRejectMs = (uint16_t)lroundf(value);
+    } else if (name == "jump") {
+        airJumpRejectKpa = value;
+    } else if (name == "hard") {
+        airHardLimitKpa = value;
+    } else if (name == "kp") {
+        airPidKp = value;
+    } else if (name == "ki") {
+        airPidKi = value;
+    } else if (name == "kd") {
+        airPidKd = value;
+    } else if (name == "infrate" || name == "inflaterate") {
+        airInflateRateKpaPerSec = value;
+    } else if (name == "defrate" || name == "deflaterate") {
+        airDeflateRateKpaPerSec = value;
+    } else {
+        return false;
+    }
+
+    clampAirTuneParams();
+    return true;
+}
+
+bool setFeedbackParamByName(String name, float value) {
+    name.toLowerCase();
+    if (!isfinite(value)) {
+        return false;
+    }
+
+    if (name == "on") {
+        cableCurrentFeedbackEnabled = value > 0.5f;
+    } else if (name == "low") {
+        cableLowCurrentMa = constrain((int)lroundf(value), 1, 3000);
+        if (cableHighCurrentMa <= cableLowCurrentMa) {
+            cableHighCurrentMa = cableLowCurrentMa + 1;
+        }
+    } else if (name == "high") {
+        cableHighCurrentMa = constrain((int)lroundf(value), cableLowCurrentMa + 1, 4000);
+    } else if (name == "up") {
+        cableTensionTrimUpMm = constrain(value, 0.0f, 2.0f);
+    } else if (name == "down") {
+        cableTensionTrimDownMm = constrain(value, 0.0f, 2.0f);
+    } else if (name == "max") {
+        maxMotorTensionTrimMm = constrain(value, 0.0f, 10.0f);
+    } else if (name == "interval") {
+        cableFeedbackMoveInterval = (uint8_t)constrain((int)lroundf(value), 1, 100);
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+void printDiagnosticSample(uint16_t index) {
+    AirReading reading;
+    bool airOk = readAirSensor(reading);
+
+    float pos[5] = {NAN, NAN, NAN, NAN, NAN};
+    for (int m = 1; m <= 4; m++) {
+        pos[m] = get_pos(m);
+    }
+
+    int currents[5] = {-1, -1, -1, -1, -1};
+    bool curOk = readMotorCurrents(currents);
+
+    Serial0.printf("DIAG i=%u ms=%lu x=%.2f y=%.2f path=%d/%d playing=%d en=%d airOk=%d airOn=%d airP=%.3f airStable=%.3f airF=%.3f airV=%.3f airSettle=%u airMode=%s pos=%.1f,%.1f,%.1f,%.1f curOk=%d cur=%d,%d,%d,%d trim=%.2f,%.2f,%.2f,%.2f tension=%.2f fbOn=%d\n",
+                   index, (unsigned long)millis(),
+                   currentX, currentY,
+                   webPlaybackIndex, webPathPointCount,
+                   webPlaybackActive ? 1 : 0,
+                   cableMotorsEnabled ? 1 : 0,
+                   airOk ? 1 : 0,
+                   airControlEnabled ? 1 : 0,
+                   airPressureKpa, airStableKpa, airFilteredKpa,
+                   airSensorVoltage, airSettleRemainingMs(), airMode,
+                   pos[1], pos[2], pos[3], pos[4],
+                   curOk ? 1 : 0,
+                   currents[1], currents[2], currents[3], currents[4],
+                   motorTensionTrimMm[1], motorTensionTrimMm[2],
+                   motorTensionTrimMm[3], motorTensionTrimMm[4],
+                   ropeTensionOffsetMm,
+                   cableCurrentFeedbackEnabled ? 1 : 0);
+}
+
+void runDiagnosticLog(uint16_t samples, uint16_t intervalMs) {
+    samples = constrain(samples, (uint16_t)1, (uint16_t)2000);
+    intervalMs = constrain(intervalMs, (uint16_t)50, (uint16_t)5000);
+    Serial0.printf("DIAGLOG BEGIN samples=%u interval=%u\n", samples, intervalMs);
+    for (uint16_t i = 0; i < samples; i++) {
+        uint32_t sampleStart = millis();
+        handleWebPlayback();
+        handleAirManualBits();
+        handleAirControl();
+        printDiagnosticSample(i);
+        while ((uint32_t)(millis() - sampleStart) < intervalMs) {
+            handleWebPlayback();
+            handleAirManualBits();
+            handleAirControl();
+            delay(5);
+        }
+    }
+    Serial0.println("DIAGLOG END");
+}
+
+void runAirControlLog(uint16_t samples, uint16_t intervalMs) {
+    samples = constrain(samples, (uint16_t)1, (uint16_t)2000);
+    intervalMs = constrain(intervalMs, (uint16_t)40, (uint16_t)5000);
+    Serial0.printf("AIRLOG BEGIN samples=%u interval=%u\n", samples, intervalMs);
+    for (uint16_t i = 0; i < samples; i++) {
+        uint32_t sampleStart = millis();
+        handleAirManualBits();
+        handleAirControl();
+        AirReading reading;
+        bool ok = readAirSensor(reading);
+        int32_t pauseLeft = (int32_t)(airAutoPauseUntilMs - millis());
+        if (pauseLeft < 0) {
+            pauseLeft = 0;
+        }
+        Serial0.printf("AIRLOG i=%u ms=%lu ok=%d on=%d mode=%s bits=%u duty=%u p=%.3f stable=%.3f filtered=%.3f est=%.3f pid=%.3f target=%.3f v=%.3f min=%.2f max=%.2f settle=%u pause=%ld hard=%.2f\n",
+                       i, (unsigned long)millis(),
+                       ok ? 1 : 0,
+                       airControlEnabled ? 1 : 0,
+                       airMode,
+                       airAutoActionBits,
+                       airPumpDutyCommand,
+                       airPressureKpa,
+                       airStableKpa,
+                       airFilteredKpa,
+                       airPidEstimateKpa,
+                       airPidOutput,
+                       airPressureTargetKpa(),
+                       airSensorVoltage,
+                       airMinKpa,
+                       airMaxKpa,
+                       airSettleRemainingMs(),
+                       (long)pauseLeft,
+                       airHardLimitKpa);
+        while ((uint32_t)(millis() - sampleStart) < intervalMs) {
+            handleAirManualBits();
+            handleAirControl();
+            delay(5);
+        }
+    }
+    Serial0.println("AIRLOG END");
+}
+
 bool parseNewCommand(String s) {
     s.trim();
     if (s == "home") {
         autoCalibrateHome();
+        return true;
+    }
+
+    if (s.startsWith("coef set ")) {
+        float nextCoeff[5] = {0};
+        if (sscanf(s.c_str(), "coef set %f %f %f %f",
+                   &nextCoeff[1], &nextCoeff[2], &nextCoeff[3], &nextCoeff[4]) != 4) {
+            Serial0.println("COEF error=bad-args usage: coef set M1 M2 M3 M4");
+            return true;
+        }
+        if (!coefficientsAreValid(nextCoeff)) {
+            Serial0.println("COEF error=invalid");
+            Serial0.printf("Expected signs/range, got M1=%.3f M2=%.3f M3=%.3f M4=%.3f\n",
+                           nextCoeff[1], nextCoeff[2], nextCoeff[3], nextCoeff[4]);
+            return true;
+        }
+        for (int m = 1; m <= 4; m++) {
+            realDeg2mm[m] = nextCoeff[m];
+        }
+        saveCalibration();
+        printCoefficients();
         return true;
     }
 
@@ -2458,10 +5205,15 @@ bool parseNewCommand(String s) {
         resetCalibrationToDefaults();
         webSpeedPercent = 50;
         webTravelSpeedPercent = 15;
+        motionCurrentMa = defaultMotionCurrentMa;
+        ropeTensionOffsetMm = defaultRopeTensionOffsetMm;
         calibrationBaseCurrent = defaultCalibrationBaseCurrent;
         calibrationPullCurrent = defaultCalibrationPullCurrent;
+        resetTensionFeedbackParams();
+        resetAirTuneParams();
         saveCalibration();
         saveWebSettings();
+        saveAirSettings();
         Serial0.println("USBSTATUS settings=reset");
         return true;
     }
@@ -2483,6 +5235,77 @@ bool parseNewCommand(String s) {
         return true;
     }
 
+    if (s.startsWith("current ")) {
+        int value = constrain(s.substring(8).toInt(), (int)minMotionCurrentMa, (int)maxMotionCurrentMa);
+        motionCurrentMa = (uint16_t)value;
+        saveWebSettings();
+        Serial0.printf("USBSTATUS motionCurrent=%u\n", motionCurrentMa);
+        return true;
+    }
+
+    if (s.startsWith("tension ")) {
+        float value = constrain(s.substring(8).toFloat(), 0.0f, maxRopeTensionOffsetMm);
+        ropeTensionOffsetMm = value;
+        saveWebSettings();
+        Serial0.printf("USBSTATUS tension=%.1f\n", ropeTensionOffsetMm);
+        return true;
+    }
+
+    if (s == "tensionfb" || s == "tensionfb status") {
+        updateCableTensionFeedback(true);
+        Serial0.printf("TENSIONFB on=%d trim=%.2f,%.2f,%.2f,%.2f low=%d high=%d interval=%u\n",
+                       cableCurrentFeedbackEnabled ? 1 : 0,
+                       motorTensionTrimMm[1], motorTensionTrimMm[2],
+                       motorTensionTrimMm[3], motorTensionTrimMm[4],
+                       cableLowCurrentMa, cableHighCurrentMa, cableFeedbackMoveInterval);
+        return true;
+    }
+
+    if (s == "tensionfb on") {
+        cableCurrentFeedbackEnabled = true;
+        resetCableTensionFeedback();
+        Serial0.println("TENSIONFB on=1 reset=1");
+        return true;
+    }
+
+    if (s == "tensionfb off") {
+        cableCurrentFeedbackEnabled = false;
+        resetCableTensionFeedback();
+        Serial0.println("TENSIONFB on=0 reset=1");
+        return true;
+    }
+
+    if (s == "tensionfb reset") {
+        resetCableTensionFeedback();
+        Serial0.println("TENSIONFB reset=1");
+        return true;
+    }
+
+    if (s == "fbparam" || s == "tensionfb config") {
+        printTensionFeedbackConfig();
+        return true;
+    }
+
+    if (s == "fbparam reset") {
+        resetTensionFeedbackParams();
+        saveWebSettings();
+        Serial0.println("FBPARAM reset=1");
+        return true;
+    }
+
+    if (s.startsWith("fbparam ")) {
+        String name;
+        float value = NAN;
+        if (!parseNameValueCommand(s, "fbparam", name, value) ||
+            !setFeedbackParamByName(name, value)) {
+            Serial0.println("FBPARAM error=bad-args usage: fbparam low|high|up|down|max|interval|on VALUE");
+            return true;
+        }
+        saveWebSettings();
+        printTensionFeedbackConfig();
+        return true;
+    }
+
     if (s.startsWith("caltorque ")) {
         int base = 0;
         int pull = 0;
@@ -2495,6 +5318,273 @@ bool parseNewCommand(String s) {
         saveWebSettings();
         Serial0.printf("USBSTATUS calBase=%d calPull=%d\n",
                        calibrationBaseCurrent, calibrationPullCurrent);
+        return true;
+    }
+
+    if (s == "airparam" || s == "airtune") {
+        printAirTuneParams();
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airlog ")) {
+        int samples = 80;
+        int interval = 100;
+        sscanf(s.c_str(), "airlog %d %d", &samples, &interval);
+        runAirControlLog((uint16_t)samples, (uint16_t)interval);
+        return true;
+    }
+
+    if (s == "airparam reset" || s == "airtune reset") {
+        resetAirTuneParams();
+        saveAirSettings();
+        Serial0.println("AIRTUNE reset=1");
+        return true;
+    }
+
+    if (s.startsWith("airparam ") || s.startsWith("airtune ")) {
+        const char *prefix = s.startsWith("airparam ") ? "airparam" : "airtune";
+        String name;
+        float value = NAN;
+        if (!parseNameValueCommand(s, prefix, name, value) ||
+            !setAirParamByName(name, value)) {
+            Serial0.println("AIRTUNE error=bad-args usage: airparam inflate|deflate|manualInflate|manualDeflate|deflateMax|period|inflateSettle|deflateSettle|transient|jump|hard|kp|ki|kd|infRate|defRate VALUE");
+            return true;
+        }
+        saveAirSettings();
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airscan") {
+        findAirSensor(true);
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airbus") {
+        scanAirBus();
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airadc") {
+        scanAirAnalogPins();
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airadcpin ")) {
+        int pin = 0;
+        if (sscanf(s.c_str(), "airadcpin %d", &pin) != 1 || !airAnalogPinAllowed(pin)) {
+            Serial0.println("AIRADC error=bad-pin allowed=1..8");
+            return true;
+        }
+        airAnalogPin = pin;
+        analogSetPinAttenuation(airAnalogPin, ADC_11db);
+        pinMode(airAnalogPin, INPUT);
+        saveAirSettings();
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airread" || s == "airstatus") {
+        ensureAirSensor(true);
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airzero") {
+        if (!calibrateAirZero()) {
+            Serial0.println("AIRZERO failed");
+        }
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airgears") {
+        printAirGears();
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airgear ")) {
+        int gear = 0;
+        float mn = 0.0f;
+        float mx = 0.0f;
+        int parsed = sscanf(s.c_str(), "airgear %d %f %f", &gear, &mn, &mx);
+        if (parsed < 1 || gear < 1 || gear > airGearCount) {
+            Serial0.printf("AIRGEAR bad usage: airgear N or airgear N MIN MAX, N=1..%u\n", airGearCount);
+            return true;
+        }
+        if (parsed >= 3) {
+            if (!validAirRange(mn, mx)) {
+                Serial0.printf("AIRGEAR range=bad gear=%d usage: MIN MAX, -4.0..%.1fkPa\n", gear, airHardLimitKpa);
+                return true;
+            }
+            airGearMin[gear - 1] = mn;
+            airGearMax[gear - 1] = mx;
+        }
+        applyAirGear((uint8_t)gear);
+        saveAirSettings();
+        printAirGears();
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airrange ")) {
+        float mn = 0.0f;
+        float mx = 0.0f;
+        if (sscanf(s.c_str(), "airrange %f %f", &mn, &mx) != 2 ||
+            !validAirRange(mn, mx)) {
+            Serial0.printf("AIRSTATUS range=bad usage: airrange MIN MAX, -4.0..%.1fkPa\n", airHardLimitKpa);
+            return true;
+        }
+        airMinKpa = mn;
+        airMaxKpa = mx;
+        if (airSelectedGear >= 1 && airSelectedGear <= airGearCount) {
+            airGearMin[airSelectedGear - 1] = mn;
+            airGearMax[airSelectedGear - 1] = mx;
+        }
+        saveAirSettings();
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airon") {
+        if (!ensureAirSensor(true)) {
+            Serial0.println("AIRSTATUS on=0 error=sensor-not-found");
+            return true;
+        }
+        if (!isnan(airPressureKpa) && airPressureKpa > airHardLimitKpa) {
+            pulseAirAction(airDeflate, airAutoDeflatePulseMs);
+            airControlEnabled = false;
+            Serial0.println("AIRSTATUS on=0 error=hard-limit");
+            printAirStatus();
+            return true;
+        }
+        beginAirControl();
+        Serial0.println("AIRSTATUS on=1");
+        return true;
+    }
+
+    if (s == "airoff") {
+        airControlEnabled = false;
+        airOff();
+        Serial0.println("AIRSTATUS on=0 mode=off");
+        return true;
+    }
+
+    if (s == "airinflate") {
+        airControlEnabled = false;
+        pulseAirAction(airInflate, airManualInflatePulseMs);
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airdeflate") {
+        airControlEnabled = false;
+        pulseAirAction(airDeflate, airManualDeflatePulseMs);
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airkeep") {
+        airControlEnabled = false;
+        airKeep();
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "airtest") {
+        runAirPinTest();
+        return true;
+    }
+
+    if (s.startsWith("airpulse ")) {
+        int pin = 0;
+        int ms = airDetectPulseMs;
+        int parsed = sscanf(s.c_str(), "airpulse %d %d", &pin, &ms);
+        if (parsed < 1) {
+            Serial0.println("AIRPULSE error=bad-args usage: airpulse PIN MS");
+            return true;
+        }
+        rawAirPulse(pin, (uint16_t)ms);
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airprobe ")) {
+        int bits = 0;
+        int ms = airProbeMaxMs;
+        int parsed = sscanf(s.c_str(), "airprobe %d %d", &bits, &ms);
+        if (parsed < 1 || bits < 0 || bits > 7) {
+            Serial0.println("AIRPROBE error=bad-args usage: airprobe BITS MS");
+            return true;
+        }
+        safeAirProbeBits((uint8_t)bits, (uint16_t)ms);
+        printAirStatus();
+        return true;
+    }
+
+    if (s.startsWith("airbits ")) {
+        int bits = 0;
+        int ms = 0;
+        int duty = airPumpPwmMaxDuty;
+        int parsed = sscanf(s.c_str(), "airbits %d %d %d", &bits, &ms, &duty);
+        if (parsed < 1 || bits < 0 || bits > 7) {
+            Serial0.println("AIRBITS error=bad-args usage: airbits BITS [MS=0 continuous] [PWM]");
+            return true;
+        }
+        startAirManualBits((uint8_t)bits, (uint16_t)ms, (uint8_t)constrain(duty, 0, 255));
+        return true;
+    }
+
+    if (s.startsWith("airpwm ")) {
+        int duty = airPumpPwmMaxDuty;
+        int ms = 0;
+        if (sscanf(s.c_str(), "airpwm %d %d", &duty, &ms) < 1) {
+            Serial0.println("AIRPWM error=bad-args usage: airpwm PWM [MS=0 continuous]");
+            return true;
+        }
+        startAirManualBits(0x04, (uint16_t)ms, (uint8_t)constrain(duty, 0, 255));
+        return true;
+    }
+
+    if (s == "airautoid") {
+        autoIdentifyAirPins();
+        return true;
+    }
+
+    if (s.startsWith("airmap ")) {
+        setupAirPins();
+        saveAirSettings();
+        Serial0.println("AIRMAP fixed pump=11 vent=9 aux=10");
+        printAirStatus();
+        return true;
+    }
+
+    if (s == "current" || s == "currents" || s == "sense") {
+        readAllMotorCurrent(true);
+        return true;
+    }
+
+    if (s == "diag") {
+        printDiagnosticSample(0);
+        return true;
+    }
+
+    if (s.startsWith("diaglog ")) {
+        int samples = 0;
+        int interval = 0;
+        if (sscanf(s.c_str(), "diaglog %d %d", &samples, &interval) < 1) {
+            Serial0.println("DIAGLOG error=bad-args usage: diaglog SAMPLES [INTERVAL_MS]");
+            return true;
+        }
+        if (interval <= 0) {
+            interval = 200;
+        }
+        runDiagnosticLog((uint16_t)samples, (uint16_t)interval);
         return true;
     }
 
@@ -2556,7 +5646,11 @@ bool parseNewCommand(String s) {
     }
 
     if (s == "usbstatus" || s == "webstatus") {
-        Serial0.printf("USBSTATUS strokes=%d points=%d playing=%d loop=%d source=%s version=%lu speed=%u travel=%u calBase=%d calPull=%d m1=%.3f m2=%.3f m3=%.3f m4=%.3f\n",
+        if (airSensorOnline) {
+            AirReading reading;
+            readAirSensor(reading);
+        }
+        Serial0.printf("USBSTATUS strokes=%d points=%d playing=%d loop=%d source=%s version=%lu speed=%u travel=%u motionCurrent=%u tension=%.1f calBase=%d calPull=%d airOn=%d airOk=%d airMap=%d airGear=%u airP=%.3f airStable=%.3f airF=%.3f airTarget=%.3f airDuty=%u airPid=%.3f airEst=%.3f airSettle=%u airV=%.3f airZero=%.3f airMin=%.2f airMax=%.2f airMode=%s airPump=%d airVent=%d airHold=%d airAdc=%d fbOn=%d fbLow=%d fbHigh=%d fbUp=%.3f fbDown=%.3f fbMax=%.2f fbInt=%u airInfMs=%u airDefMs=%u airPeriod=%u airHard=%.2f m1=%.3f m2=%.3f m3=%.3f m4=%.3f\n",
                        webStrokeCount,
                        webPathPointCount,
                        webPlaybackActive ? 1 : 0,
@@ -2565,8 +5659,42 @@ bool parseNewCommand(String s) {
                        (unsigned long)webPathVersion,
                        webSpeedPercent,
                        webTravelSpeedPercent,
+                       motionCurrentMa,
+                       ropeTensionOffsetMm,
                        calibrationBaseCurrent,
                        calibrationPullCurrent,
+                       airControlEnabled ? 1 : 0,
+                       airSensorOnline ? 1 : 0,
+                       airPinMapConfirmed ? 1 : 0,
+                       airSelectedGear,
+                       airPressureKpa,
+                       airStableKpa,
+                       airFilteredKpa,
+                       airPressureTargetKpa(),
+                       airPumpDutyCommand,
+                       airPidOutput,
+                       airPidEstimateKpa,
+                       airSettleRemainingMs(),
+                       airSensorVoltage,
+                       airZeroVoltage,
+                       airMinKpa,
+                       airMaxKpa,
+                       airMode,
+                       airPumpPin,
+                       airVentPin,
+                       airHoldPin,
+                       airAnalogPin,
+                       cableCurrentFeedbackEnabled ? 1 : 0,
+                       cableLowCurrentMa,
+                       cableHighCurrentMa,
+                       cableTensionTrimUpMm,
+                       cableTensionTrimDownMm,
+                       maxMotorTensionTrimMm,
+                       cableFeedbackMoveInterval,
+                       airAutoInflatePulseMs,
+                       airAutoDeflatePulseMs,
+                       airControlPeriodMs,
+                       airHardLimitKpa,
                        realDeg2mm[1],
                        realDeg2mm[2],
                        realDeg2mm[3],
@@ -2629,6 +5757,7 @@ void setup() {
     Serial0.println("默认模式：单电机独立测试，输入M切换全体同步");
     loadCalibration();
     loadWebSettings();
+    setupAirControl();
     setupWebPortal();
     show_help();
 }
@@ -2640,6 +5769,8 @@ void loop() {
     handleWebPortal();
     handleWebCalibration();
     handleWebPlayback();
+    handleAirManualBits();
+    handleAirControl();
     emitUsbReadyHeartbeat();
 
     if (usbBinaryUploadActive) {

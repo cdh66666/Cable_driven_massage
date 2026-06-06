@@ -3,566 +3,517 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>USB轨迹调试端</title>
+<title>USB 轨迹控制台</title>
 <style>
 *{box-sizing:border-box}
-:root{--bg:#eef1f5;--panel:#fff;--line:#cfd6df;--ink:#111;--muted:#5b6472;--dark:#111;--blue:#1d4ed8;--green:#057a55;--red:#a3161c;--gray:#4b5563}
-body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink)}
-main{width:min(1780px,100%);margin:0 auto;padding:18px;display:grid;grid-template-columns:330px minmax(520px,1fr) 360px;gap:18px;align-items:start}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
-h1{font-size:24px;margin:0 0 14px}
-h2{font-size:16px;margin:18px 0 8px}
-.first{margin-top:0}
-label{display:block;font-size:13px;color:#222;margin:9px 0 4px}
-button,input,select{font:inherit}
-button{width:100%;min-height:40px;border:0;border-radius:7px;background:var(--dark);color:#fff;font-weight:700;margin:4px 0;cursor:pointer}
-button.secondary{background:var(--gray)}
-button.green{background:var(--green)}
-button.red{background:var(--red)}
-button.blue{background:var(--blue)}
-button.ghost{background:#f6f7f9;color:#111;border:1px solid var(--line)}
-button:disabled{opacity:.45;cursor:not-allowed}
-input,select{width:100%;height:34px;border:1px solid #b9c0ca;border-radius:4px;background:#fff;padding:4px 7px;margin:0 0 6px}
-input[type=file]{height:auto;padding:6px}
-input[type=range]{padding:0}
+body{margin:0;background:#edf0f4;color:#111;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
+main{max-width:1320px;margin:0 auto;padding:18px;display:grid;grid-template-columns:360px 1fr;gap:18px}
+.panel{background:#fff;border:1px solid #d6dbe3;border-radius:8px;padding:16px}
+h1{font-size:28px;margin:0 0 14px}
+h2{font-size:18px;margin:18px 0 10px}
+label{display:block;font-size:14px;margin:10px 0 4px;color:#333}
+select,input,button{font:inherit}
+select,input[type=file]{width:100%;min-height:36px}
+button{width:100%;height:50px;border:0;border-radius:8px;background:#111;color:#fff;font-weight:750;font-size:18px;margin:6px 0;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-.inline{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end}
-.kv{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;font-size:13px}
-.muted{color:var(--muted);font-size:13px;line-height:1.45}
-.stage{padding:16px}
-#pad{width:100%;max-height:calc(100vh - 70px);aspect-ratio:1/1;background:#fff;border:2px solid #111;display:block;touch-action:none;cursor:crosshair}
-#status{white-space:pre-wrap;overflow:auto;max-height:42vh;line-height:1.45;font-size:13px;color:#20242a;background:#f7f8fa;border:1px solid #dfe4ea;border-radius:6px;padding:8px}
-#stateLine{font-size:13px;color:#111;background:#f7f8fa;border:1px solid #dfe4ea;border-radius:6px;padding:8px;line-height:1.45}
-.rangeLine{display:grid;grid-template-columns:1fr 56px;gap:8px;align-items:center}
-.warn{font-size:12px;color:#7a3410;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;padding:7px;line-height:1.35;margin-top:6px}
-.compact button{min-height:34px;font-size:14px}
-@media (max-width:1260px){main{grid-template-columns:320px 1fr}.right{grid-column:1 / -1;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.right h2{margin-top:0}}
-@media (max-width:820px){main{grid-template-columns:1fr;padding:10px}.right{display:block}#pad{max-height:none}}
+.manual{background:#155e75}
+.manual.fast{background:#7c2d12}
+.stop{background:#a7191d}
+.secondary{background:#4b5563}
+.calib{background:#8a3415}
+.muted{color:#555;font-size:13px;line-height:1.45}
+.meter{background:#f6f7f9;border:1px solid #e2e5ea;border-radius:8px;padding:12px;margin:8px 0}
+.volt{font-size:38px;line-height:1.05;font-weight:800}
+.small-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:14px}
+.value{font-weight:700}
+.topline{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.topline button{height:38px;font-size:14px;margin:0;width:auto;padding:0 12px}
+.slider{display:grid;grid-template-columns:auto 1fr 46px;gap:10px;align-items:center;margin:8px 0}
+.slider input{width:100%;accent-color:#111}
+.slider span{font-weight:700;text-align:right}
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:12px;color:#333;margin:6px 0}
+.legend i{display:inline-block;width:12px;height:3px;margin-right:5px;vertical-align:middle}
+#airChart{width:100%;height:128px;background:#fff;border:1px solid #d8dde6;border-radius:8px;display:block}
+#pad{width:100%;aspect-ratio:1/1;background:#fff;border:3px solid #111;display:block;touch-action:none}
+#log{white-space:pre-wrap;max-height:240px;overflow:auto;font-size:13px;line-height:1.4;background:#f6f7f9;border:1px solid #e2e5ea;border-radius:8px;padding:10px}
+@media(max-width:900px){main{grid-template-columns:1fr}.panel.canvas{order:-1}}
 </style>
 </head>
 <body>
 <main>
   <section class="panel">
-    <h1>USB轨迹调试端</h1>
-    <div class="row">
-      <button id="connect">连接USB串口</button>
-      <button id="disconnect" class="secondary">断开</button>
-    </div>
-    <div id="stateLine">未连接</div>
+    <h1>USB 轨迹控制台</h1>
 
-    <h2>轨迹文件</h2>
+    <div class="topline">
+      <select id="ports"></select>
+      <button id="refreshPorts" class="secondary">刷新</button>
+    </div>
+    <p class="muted">上电后选 USB-Enhanced-SERIAL CH343 对应端口，一般是 COM52。关闭 VSCode 串口监视器后再操作。</p>
+
+    <h2>气压监视</h2>
+    <div class="meter">
+      <div class="volt"><span id="voltage">--</span> V</div>
+      <div class="small-grid">
+        <div>气压：<span id="pressure" class="value">--</span></div>
+        <div>控制：<span id="airOn" class="value">--</span></div>
+        <div>模式：<span id="airMode" class="value">--</span></div>
+        <div>PWM：<span id="duty" class="value">--</span></div>
+        <div>刷新：<span id="sampleRate" class="value">--</span></div>
+      </div>
+    </div>
+    <canvas id="airChart" width="640" height="220"></canvas>
+    <div class="legend">
+      <div><i style="background:#0f766e"></i>实时/稳定</div>
+    </div>
+
+    <h2>手动调气</h2>
+    <div class="slider">
+      <label for="manualPwm">充气 PWM</label>
+      <input id="manualPwm" type="range" min="0" max="255" value="140">
+      <span id="manualPwmText">140</span>
+    </div>
+    <div class="row">
+      <button id="manualInflate" class="manual">手动充气</button>
+      <button id="manualDeflateSlow" class="manual">慢放气</button>
+    </div>
+    <div class="row">
+      <button id="manualDeflateFast" class="manual fast">快放气</button>
+      <button id="manualStop" class="secondary">停止手动</button>
+    </div>
+
+    <h2>画图</h2>
+    <label>导入轨迹 TXT / JSON</label>
     <input id="file" type="file" accept=".txt,.json,text/plain,application/json">
-    <button id="uploadFile">上传文件轨迹</button>
-    <div class="row">
-      <button id="exportJson" class="ghost">导出JSON</button>
-      <button id="exportTxt" class="ghost">导出TXT</button>
+    <button id="upload">上传轨迹</button>
+    <div class="slider">
+      <label for="drawSpeed">轨迹速度</label>
+      <input id="drawSpeed" type="range" min="1" max="100" value="50">
+      <span id="drawSpeedText">50</span>
     </div>
+    <div class="slider">
+      <label for="motionCurrent">电机电流</label>
+      <input id="motionCurrent" type="range" min="300" max="2200" step="50" value="1000">
+      <span id="motionCurrentText">1000mA</span>
+    </div>
+    <div class="row">
+      <button id="start">开始绘制</button>
+      <button id="stop" class="stop">停止</button>
+    </div>
+    <button id="clear" class="secondary">清空画板</button>
 
-    <h2>画布轨迹</h2>
-    <div class="row">
-      <button id="uploadCanvas">上传当前画布</button>
-      <button id="clearCanvas" class="secondary">清除画布</button>
-    </div>
-    <div class="row">
-      <button id="loadBoardPreview" class="ghost">读取板载状态</button>
-      <button id="clearBoardPath" class="ghost">清空板载轨迹</button>
-    </div>
+    <h2>校准</h2>
+    <button id="calibrate" class="calib">校准参数</button>
+    <button id="readStatus" class="secondary">读取状态</button>
 
-    <h2>播放</h2>
-    <div class="row">
-      <button id="start" class="green">开始</button>
-      <button id="stop" class="red">停止</button>
-    </div>
-    <div class="row">
-      <button id="loopOn" class="secondary">循环开</button>
-      <button id="loopOff" class="secondary">循环关</button>
-    </div>
-    <button id="statusBtn" class="secondary">读取状态</button>
-
-    <h2>串口日志</h2>
-    <button id="clearLog" class="ghost">清空日志</button>
-    <div id="status">请选择 USB-Enhanced-SERIAL CH343 对应的 COM 口。烧录时先点“断开”。</div>
+    <h2>状态</h2>
+    <div id="log">页面已打开，等待操作。</div>
   </section>
 
-  <section class="panel stage">
-    <canvas id="pad" width="1000" height="1000"></canvas>
-  </section>
-
-  <section class="panel right">
-    <div>
-      <h2 class="first">路径参数</h2>
-      <label class="kv"><span>绘制速度</span><b id="drawSpeedValue">50</b></label>
-      <div class="rangeLine"><input id="drawSpeed" type="range" min="1" max="100" value="50"><button id="applyDrawSpeed" class="ghost">应用</button></div>
-      <label class="kv"><span>空移速度</span><b id="travelSpeedValue">15</b></label>
-      <div class="rangeLine"><input id="travelSpeed" type="range" min="1" max="100" value="15"><button id="applyTravelSpeed" class="ghost">应用</button></div>
-      <label class="kv"><span>校准保持扭矩 mA</span><b id="baseTorqueValue">80</b></label>
-      <input id="baseTorque" type="range" min="20" max="300" value="80">
-      <label class="kv"><span>校准当前电机扭矩 mA</span><b id="pullTorqueValue">900</b></label>
-      <input id="pullTorque" type="range" min="300" max="1500" value="900">
-      <button id="applyTorque" class="ghost">保存扭矩参数</button>
-    </div>
-
-    <div>
-      <h2>整机调试</h2>
-      <div class="row">
-        <button id="enableAll" class="green">全部使能</button>
-        <button id="disableAll" class="red">全部失能</button>
-      </div>
-      <div class="row">
-        <button id="allPos" class="secondary">读取全部位置</button>
-        <button id="allZero" class="secondary">全部位置清零</button>
-      </div>
-      <div class="row">
-        <button id="calibrate" class="blue">校准系数</button>
-        <button id="coef" class="secondary">读取系数</button>
-      </div>
-      <div class="inline">
-        <label>X(mm)<input id="gotoX" type="number" min="0" max="150" step="0.1" value="75"></label>
-        <label>Y(mm)<input id="gotoY" type="number" min="0" max="150" step="0.1" value="75"></label>
-        <button id="gotoBtn" class="ghost">移动</button>
-      </div>
-      <button id="ricePreset" class="ghost">载入内置图案</button>
-    </div>
-
-    <div>
-      <h2>单电机调试</h2>
-      <label>电机ID</label>
-      <select id="motorId">
-        <option value="1">1</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-        <option value="4">4</option>
-      </select>
-      <div class="three compact">
-        <button id="motorPos" class="secondary">位置</button>
-        <button id="motorEnable" class="green">使能</button>
-        <button id="motorDisable" class="red">失能</button>
-      </div>
-      <div class="three compact">
-        <button id="motorZero" class="secondary">清零</button>
-        <button id="motorLock" class="secondary">锁键</button>
-        <button id="motorUnlock" class="secondary">解锁</button>
-      </div>
-      <button id="motorEncoderCal" class="ghost">编码器校准</button>
-      <div class="inline">
-        <label>角度<input id="motorAngle" type="number" step="0.1" value="0"></label>
-        <label>扭矩mA<input id="motorTorque" type="number" step="10" value="0"></label>
-        <button id="sendMotorAngle" class="ghost">发送</button>
-      </div>
-      <button id="sendMotorTorque" class="ghost">发送扭矩</button>
-    </div>
-
-    <div>
-      <h2>设置电机ID</h2>
-      <div class="inline">
-        <label>当前ID<input id="oldMotorId" type="number" min="1" max="255" value="1"></label>
-        <label>新ID<input id="newMotorId" type="number" min="1" max="255" value="1"></label>
-        <button id="setMotorId" class="blue">设置</button>
-      </div>
-      <div class="warn">一次只接入或只修改一个目标电机，设置后断电重启电机，再用新 ID 读取位置确认。</div>
-    </div>
-
-    <div>
-      <h2>原始命令</h2>
-      <input id="rawCommand" placeholder="例如: usbstatus / 1p / setid 1 4">
-      <button id="sendRaw" class="secondary">发送命令</button>
-    </div>
+  <section class="panel canvas">
+    <canvas id="pad" width="900" height="900"></canvas>
   </section>
 </main>
+
 <script>
-const CANVAS_MM = 150;
-const MAX_POINTS = 200000;
-const FRAME = 42;
-const MIN_DRAW_MM = 0.35;
+const L0 = 150;
 const pad = document.getElementById('pad');
 const ctx = pad.getContext('2d');
-const statusEl = document.getElementById('status');
-const stateEl = document.getElementById('stateLine');
-const fileInput = document.getElementById('file');
+const airChart = document.getElementById('airChart');
+const airCtx = airChart.getContext('2d');
+const ports = document.getElementById('ports');
+const logEl = document.getElementById('log');
+const voltageEl = document.getElementById('voltage');
+const pressureEl = document.getElementById('pressure');
+const airOnEl = document.getElementById('airOn');
+const airModeEl = document.getElementById('airMode');
+const dutyEl = document.getElementById('duty');
+const sampleRateEl = document.getElementById('sampleRate');
+const drawSpeed = document.getElementById('drawSpeed');
+const drawSpeedText = document.getElementById('drawSpeedText');
+const motionCurrent = document.getElementById('motionCurrent');
+const motionCurrentText = document.getElementById('motionCurrentText');
+const manualPwm = document.getElementById('manualPwm');
+const manualPwmText = document.getElementById('manualPwmText');
 let strokes = [];
+let drawing = false;
 let activeStroke = null;
-let serialPort = null;
-let writer = null;
-let serialReader = null;
-let readBuffer = '';
-let pending = [];
-let boardOnline = false;
-let drawingPointer = null;
+let polling = false;
+let playbackActive = false;
+let uploadActive = false;
+let airPollMs = 100;
+let airSamples = [];
+let lastSampleAt = 0;
+let sampleTicks = [];
+const maxAirSamples = 900;
 
-function $(id){return document.getElementById(id);}
-function sleep(ms){return new Promise(resolve => setTimeout(resolve, ms));}
-function pointCount(source=strokes){return source.reduce((sum, stroke) => sum + stroke.length, 0);}
-function setState(text){stateEl.textContent = text;}
-function addStatus(text){statusEl.textContent = (text + '\n' + statusEl.textContent).slice(0, 9000);}
-function clamp(value, min, max){return Math.max(min, Math.min(max, value));}
-function motorId(){return $('motorId').value;}
+function log(text){logEl.textContent = text || '无返回。';}
+function appendLog(text){logEl.textContent = `${text}\n${logEl.textContent}`.slice(0,5000);}
+function selectedPort(){return ports.value || '';}
 
-function updateStats(extra=''){
-  const prefix = serialPort ? 'USB已连接' : '未连接';
-  const text = `${prefix} | 本地轨迹 ${strokes.length} 段 / ${pointCount()} 点${extra ? ' | ' + extra : ''}`;
-  setState(text);
+async function api(path, body){
+  const res = await fetch(path, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body || {})
+  });
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || '请求失败');
+  return data.message || '';
 }
 
-function canvasToMm(event){
-  const rect = pad.getBoundingClientRect();
-  const sx = pad.width / rect.width;
-  const sy = pad.height / rect.height;
-  const px = (event.clientX - rect.left) * sx;
-  const py = (event.clientY - rect.top) * sy;
-  const inner = pad.width - FRAME * 2;
-  const x = clamp((px - FRAME) / inner * CANVAS_MM, 0, CANVAS_MM);
-  const y = clamp(CANVAS_MM - (py - FRAME) / inner * CANVAS_MM, 0, CANVAS_MM);
-  return {x, y};
+async function command(command, prefixes, timeout=4){
+  return await api('/api/command', {port:selectedPort(), command, prefixes, timeout});
 }
 
-function addPointToActive(point){
-  if (!activeStroke) return;
-  const last = activeStroke[activeStroke.length - 1];
-  if (last && Math.hypot(point.x - last.x, point.y - last.y) < MIN_DRAW_MM) return;
-  activeStroke.push(point);
+function parseValue(text, key){
+  const re = new RegExp('(?:^|\\s)' + key + '=([^\\s]+)');
+  const m = text.match(re);
+  return m ? m[1].replace(/[A-Za-z]+$/,'') : null;
+}
+
+function numValue(text, key){
+  const raw = parseValue(text, key);
+  if(raw === null) return NaN;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function updateTelemetry(text){
+  const v = numValue(text, 'v') || numValue(text, 'airV');
+  const p = numValue(text, 'p') || numValue(text, 'airP');
+  const stable = numValue(text, 'stable') || numValue(text, 'airStable');
+  const duty = numValue(text, 'duty') || numValue(text, 'airDuty');
+  const on = parseValue(text, 'on') || parseValue(text, 'airOn');
+  const mode = parseValue(text, 'mode') || parseValue(text, 'airMode');
+
+  if(Number.isFinite(v)) voltageEl.textContent = v.toFixed(3);
+  if(Number.isFinite(p) || Number.isFinite(stable)){
+    pressureEl.textContent = `${Number.isFinite(p)?p.toFixed(3):'--'} / ${Number.isFinite(stable)?stable.toFixed(3):'--'} kPa`;
+  }
+  if(Number.isFinite(duty)) dutyEl.textContent = `${duty.toFixed(0)}/255`;
+  if(on !== null) airOnEl.textContent = (on === '1' || on === 'true') ? '开' : '关';
+  if(mode !== null) airModeEl.textContent = mode;
+
+  const now = performance.now();
+  if(Number.isFinite(p) || Number.isFinite(stable)){
+    airSamples.push({
+      t: now,
+      p: Number.isFinite(stable) ? stable : p,
+      raw: Number.isFinite(p) ? p : stable
+    });
+    while(airSamples.length > maxAirSamples) airSamples.shift();
+    sampleTicks.push(now);
+    while(sampleTicks.length && now - sampleTicks[0] > 1000) sampleTicks.shift();
+    sampleRateEl.textContent = `${sampleTicks.length}Hz / 图100Hz`;
+    lastSampleAt = now;
+  }
+}
+
+function drawAirChart(){
+  const w = airChart.width;
+  const h = airChart.height;
+  airCtx.clearRect(0,0,w,h);
+  airCtx.fillStyle = '#fff';
+  airCtx.fillRect(0,0,w,h);
+  airCtx.strokeStyle = '#d7dde7';
+  airCtx.lineWidth = 1;
+  for(let i=0;i<=4;i++){
+    const y = 16 + i*(h-32)/4;
+    airCtx.beginPath(); airCtx.moveTo(44,y); airCtx.lineTo(w-10,y); airCtx.stroke();
+  }
+  const recent = airSamples.slice(-300);
+  if(recent.length < 2){
+    airCtx.fillStyle = '#777';
+    airCtx.fillText('等待气压数据...', 52, 36);
+    return;
+  }
+  let vals = [];
+  for(const s of recent){
+    ['p','raw','min','max','target'].forEach(k => { if(Number.isFinite(s[k])) vals.push(s[k]); });
+  }
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if(!Number.isFinite(lo) || !Number.isFinite(hi) || hi - lo < 0.2){ lo -= 0.1; hi += 0.1; }
+  lo -= 0.08; hi += 0.08;
+  const xOf = i => 44 + i*(w-56)/(recent.length-1);
+  const yOf = v => h-18 - (v-lo)*(h-34)/(hi-lo);
+  const last = recent[recent.length-1];
+  if(Number.isFinite(last.min) && Number.isFinite(last.max)){
+    airCtx.fillStyle = 'rgba(245,158,11,0.16)';
+    const y1 = yOf(last.max), y2 = yOf(last.min);
+    airCtx.fillRect(44, Math.min(y1,y2), w-56, Math.abs(y2-y1));
+    airCtx.strokeStyle = '#f59e0b';
+    airCtx.setLineDash([6,4]);
+    for(const v of [last.min,last.max]){
+      airCtx.beginPath(); airCtx.moveTo(44,yOf(v)); airCtx.lineTo(w-10,yOf(v)); airCtx.stroke();
+    }
+    airCtx.setLineDash([]);
+  }
+  if(Number.isFinite(last.target)){
+    airCtx.strokeStyle = '#1d4ed8';
+    airCtx.lineWidth = 2;
+    airCtx.beginPath(); airCtx.moveTo(44,yOf(last.target)); airCtx.lineTo(w-10,yOf(last.target)); airCtx.stroke();
+  }
+  airCtx.strokeStyle = '#0f766e';
+  airCtx.lineWidth = 2.2;
+  airCtx.beginPath();
+  recent.forEach((s,i) => {
+    const x = xOf(i), y = yOf(s.p);
+    if(i===0) airCtx.moveTo(x,y); else airCtx.lineTo(x,y);
+  });
+  airCtx.stroke();
+  airCtx.strokeStyle = 'rgba(17,17,17,0.32)';
+  airCtx.lineWidth = 1;
+  airCtx.beginPath();
+  recent.forEach((s,i) => {
+    const x = xOf(i), y = yOf(s.raw);
+    if(i===0) airCtx.moveTo(x,y); else airCtx.lineTo(x,y);
+  });
+  airCtx.stroke();
+  airCtx.fillStyle = '#333';
+  airCtx.font = '12px system-ui';
+  airCtx.fillText(`${hi.toFixed(2)} kPa`, 6, 20);
+  airCtx.fillText(`${lo.toFixed(2)} kPa`, 6, h-18);
+}
+
+async function refreshPorts(){
+  const res = await fetch('/api/ports');
+  const data = await res.json();
+  const old = ports.value;
+  ports.innerHTML = '';
+  for(const p of data.ports || []){
+    const opt = document.createElement('option');
+    opt.value = p.device;
+    opt.textContent = p.label;
+    if(old ? p.device === old : /COM52|CH343|USB-Enhanced/i.test(p.label)) opt.selected = true;
+    ports.appendChild(opt);
+  }
+  log(data.ports?.length ? '串口已刷新。' : '没有找到串口。上电后再点刷新。');
 }
 
 function draw(){
   ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, pad.width, pad.height);
+  ctx.fillRect(0,0,pad.width,pad.height);
   ctx.strokeStyle = '#111';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(FRAME, FRAME, pad.width - FRAME * 2, pad.height - FRAME * 2);
-  const scale = (pad.width - FRAME * 2) / CANVAS_MM;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(36,36,pad.width-72,pad.height-72);
+  const scale = (pad.width - 72) / L0;
   ctx.save();
-  ctx.translate(FRAME, FRAME);
-  ctx.strokeStyle = '#111';
-  ctx.lineWidth = 1.25;
-  ctx.lineJoin = 'round';
+  ctx.translate(36,36);
+  ctx.lineWidth = 2;
   ctx.lineCap = 'round';
-  for (const stroke of strokes) {
-    if (stroke.length < 2) continue;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#111';
+  for(const stroke of strokes){
+    if(stroke.length < 2) continue;
     ctx.beginPath();
-    ctx.moveTo(stroke[0].x * scale, (CANVAS_MM - stroke[0].y) * scale);
-    for (let i = 1; i < stroke.length; i++) {
-      ctx.lineTo(stroke[i].x * scale, (CANVAS_MM - stroke[i].y) * scale);
-    }
+    ctx.moveTo(stroke[0].x * scale, (L0 - stroke[0].y) * scale);
+    for(let i=1;i<stroke.length;i++) ctx.lineTo(stroke[i].x * scale, (L0 - stroke[i].y) * scale);
     ctx.stroke();
   }
   ctx.restore();
-  updateStats();
 }
 
-function parsePoint(point){
-  if (Array.isArray(point)) return {x:+point[0], y:+point[1]};
-  return {x:+point.x, y:+point.y};
+function canvasPoint(e){
+  const rect = pad.getBoundingClientRect();
+  const padBorderPx = 36 * rect.width / pad.width;
+  const scale = L0 / (rect.width - padBorderPx * 2);
+  const x = Math.max(0, Math.min(L0, (e.clientX - rect.left - padBorderPx) * scale));
+  const y = Math.max(0, Math.min(L0, L0 - (e.clientY - rect.top - padBorderPx) * scale));
+  return {x, y};
+}
+
+function addPoint(p){
+  const last = activeStroke?.[activeStroke.length - 1];
+  if(!last || Math.hypot(p.x - last.x, p.y - last.y) >= 0.45){
+    activeStroke.push({x:+p.x.toFixed(2), y:+p.y.toFixed(2)});
+    draw();
+  }
+}
+
+pad.addEventListener('pointerdown', e => {
+  drawing = true;
+  activeStroke = [];
+  strokes.push(activeStroke);
+  pad.setPointerCapture(e.pointerId);
+  addPoint(canvasPoint(e));
+});
+pad.addEventListener('pointermove', e => { if(drawing) addPoint(canvasPoint(e)); });
+pad.addEventListener('pointerup', e => {
+  drawing = false;
+  if(activeStroke && activeStroke.length < 2) strokes.pop();
+  activeStroke = null;
+  draw();
+});
+
+function parsePoint(p){
+  if(Array.isArray(p)) return {x:+p[0], y:+p[1]};
+  return {x:+p.x, y:+p.y};
+}
+
+function validPoint(p){
+  return Number.isFinite(p.x) && Number.isFinite(p.y);
 }
 
 function parseTrajectory(text){
   const trimmed = text.trim();
-  if (!trimmed) return [];
-  if (trimmed[0] === '[' || trimmed[0] === '{') {
-    const value = JSON.parse(trimmed);
-    let data = Array.isArray(value) ? value : (value.strokes || value.paths || value.trajectory || value.points || []);
-    if (data.length && !Array.isArray(data[0]) && data[0].x !== undefined) data = [data];
-    return data.map(stroke => stroke.map(parsePoint)
-      .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)))
-      .filter(stroke => stroke.length >= 2);
+  if(!trimmed) return [];
+  if(trimmed[0] === '['){
+    return JSON.parse(trimmed).map(stroke => stroke.map(parsePoint).filter(validPoint)).filter(s => s.length >= 2);
   }
-  return trimmed.split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line => line.split(';').map(pair => {
-      const [x, y] = pair.split(',').map(Number);
-      return {x, y};
-    }).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y)))
-    .filter(stroke => stroke.length >= 2);
+  return trimmed.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line =>
+    line.split(';').map(pair => {
+      const [x,y] = pair.split(',').map(Number);
+      return {x,y};
+    }).filter(validPoint)
+  ).filter(s => s.length >= 2);
 }
 
-function flattenBinary(source){
-  const count = pointCount(source);
-  if (count < 2) throw new Error('轨迹太短');
-  if (count > MAX_POINTS) throw new Error(`点数 ${count} 超过板子上限 ${MAX_POINTS}`);
-  const bytes = new Uint8Array(count * 5);
-  const view = new DataView(bytes.buffer);
-  let offset = 0;
-  for (const stroke of source) {
-    if (stroke.length < 2) continue;
-    for (let i = 0; i < stroke.length; i++) {
-      const x100 = clamp(Math.round(stroke[i].x * 100), 0, CANVAS_MM * 100);
-      const y100 = clamp(Math.round(stroke[i].y * 100), 0, CANVAS_MM * 100);
-      view.setUint16(offset, x100, true);
-      view.setUint16(offset + 2, y100, true);
-      view.setUint8(offset + 4, i === 0 ? 0 : 1);
-      offset += 5;
-    }
-  }
-  return {bytes, count};
-}
-
-function serializeTxt(){
-  return strokes.map(stroke => stroke.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(';')).join('\n') + '\n';
-}
-
-function download(name, body, type){
-  const blob = new Blob([body], {type});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
-function handleLine(line){
-  if (!line) return;
-  addStatus(line);
-  if (/^(USBREADY|USBSTATUS|USBBIN|USBPATH|SETID|Web |Current coefficients:|M\d+:|电机|全部位置)/.test(line)) {
-    boardOnline = true;
-  }
-  if (line.startsWith('USBSTATUS')) syncStatusValues(line);
-  const keep = [];
-  for (const item of pending) {
-    if (item.prefixes.some(prefix => line.startsWith(prefix))) {
-      item.resolve(line);
-      clearTimeout(item.timer);
-    } else {
-      keep.push(item);
-    }
-  }
-  pending = keep;
-}
-
-function syncStatusValues(line){
-  for (const pair of line.split(/\s+/).slice(1)) {
-    const [key, value] = pair.split('=');
-    if (!value) continue;
-    if (key === 'speed') setRange('drawSpeed', value);
-    if (key === 'travel' || key === 'travelSpeed') setRange('travelSpeed', value);
-    if (key === 'calBase') setRange('baseTorque', value);
-    if (key === 'calPull') setRange('pullTorque', value);
-  }
-}
-
-function setRange(id, value){
-  const el = $(id);
-  el.value = value;
-  updateRangeLabel(id);
-}
-
-function updateRangeLabel(id){
-  const map = {drawSpeed:'drawSpeedValue', travelSpeed:'travelSpeedValue', baseTorque:'baseTorqueValue', pullTorque:'pullTorqueValue'};
-  if (map[id]) $(map[id]).textContent = $(id).value;
-}
-
-async function readLoop(){
-  const decoder = new TextDecoder();
-  while (serialPort && serialPort.readable) {
-    const reader = serialPort.readable.getReader();
-    serialReader = reader;
-    try {
-      while (true) {
-        const {value, done} = await reader.read();
-        if (done) break;
-        readBuffer += decoder.decode(value, {stream:true});
-        const lines = readBuffer.split(/\r?\n/);
-        readBuffer = lines.pop() || '';
-        for (const line of lines) handleLine(line.trim());
-      }
-    } catch (err) {
-      if (serialPort) addStatus(`读取中断: ${err.message || err}`);
-    } finally {
-      try { reader.releaseLock(); } catch (err) {}
-      if (serialReader === reader) serialReader = null;
-    }
-  }
-}
-
-function waitFor(prefixes, timeoutMs){
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending = pending.filter(item => item.resolve !== resolve);
-      reject(new Error(`等待板子回复超时: ${prefixes.join(' / ')}`));
-    }, timeoutMs);
-    pending.push({prefixes, resolve, timer});
-  });
-}
-
-async function sendLine(command, prefixes = [], timeoutMs = 5000){
-  if (!writer) throw new Error('请先连接USB串口');
-  const wait = prefixes.length ? waitFor(prefixes, timeoutMs) : null;
-  await writer.write(new TextEncoder().encode(command.trim() + '\n'));
-  return wait ? await wait : 'OK';
-}
-
-async function connect(){
-  if (!('serial' in navigator)) {
-    addStatus('当前浏览器不支持 Web Serial，请用新版 Edge 或 Chrome 打开。');
-    return;
-  }
-  if (serialPort) await disconnect();
-  serialPort = await navigator.serial.requestPort();
-  await serialPort.open({baudRate:460800, bufferSize:65536});
-  writer = serialPort.writable.getWriter();
-  boardOnline = false;
-  updateStats('正在探测板子');
-  readLoop();
-  for (let i = 0; i < 6 && !boardOnline; i++) {
-    try { await sendLine('usbstatus', ['USBREADY','USBSTATUS'], 1200); }
-    catch (err) { await sleep(350); }
-  }
-  if (boardOnline) {
-    addStatus('USB串口连接成功。');
-    await command('usbstatus', ['USBSTATUS']);
-  } else {
-    addStatus('串口已打开，但没有收到板子回复。请确认选择的是 USB-Enhanced-SERIAL CH343 / COM52。');
-  }
-  updateStats();
-}
-
-async function disconnect(){
-  pending.forEach(item => clearTimeout(item.timer));
-  pending = [];
-  boardOnline = false;
-  if (serialReader) {
-    try { await serialReader.cancel(); } catch (err) {}
-  }
-  if (writer) {
-    try { writer.releaseLock(); } catch (err) {}
-    writer = null;
-  }
-  if (serialPort) {
-    await serialPort.close();
-    serialPort = null;
-  }
-  updateStats('已断开');
-  addStatus('USB串口已断开。');
-}
-
-async function command(cmd, prefixes=[]){
-  addStatus(`> ${cmd}`);
-  return await sendLine(cmd, prefixes, prefixes.length ? 7000 : 0);
-}
-
-async function uploadStrokes(source, label){
-  if (!writer) throw new Error('请先连接USB串口');
-  const {bytes, count} = flattenBinary(source);
-  updateStats(`正在上传 ${label}`);
-  const ready = await sendLine(`USBBIN ${count}`, ['USBBIN READY','USBBIN ERROR'], 12000);
-  if (ready.startsWith('USBBIN ERROR')) throw new Error(ready);
-  await writer.write(bytes);
-  const done = await waitFor(['USBBIN OK','USBBIN ERROR'], 30000);
-  if (done.startsWith('USBBIN ERROR')) throw new Error(done);
-  addStatus(`上传完成: ${done}`);
-  await command('usbstatus', ['USBSTATUS']);
-}
-
-async function loadFileToCanvas(){
-  const file = fileInput.files[0];
-  if (!file) throw new Error('请先选择 TXT / JSON 轨迹文件');
+document.getElementById('file').addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  if(!file) return;
   strokes = parseTrajectory(await file.text());
   draw();
-  addStatus(`已载入文件: ${file.name}，${strokes.length} 段，${pointCount()} 点`);
-}
-
-async function uploadFile(){
-  await loadFileToCanvas();
-  await uploadStrokes(strokes, '文件轨迹');
-}
-
-async function uploadCanvas(){
-  await uploadStrokes(strokes, '画布轨迹');
-}
-
-function runTask(fn){
-  Promise.resolve().then(fn).catch(err => addStatus(`错误: ${err.message || err}`));
-}
-
-pad.addEventListener('pointerdown', event => {
-  drawingPointer = event.pointerId;
-  pad.setPointerCapture(drawingPointer);
-  activeStroke = [];
-  addPointToActive(canvasToMm(event));
-  strokes.push(activeStroke);
-  draw();
+  log(`已载入 ${strokes.length} 段，${strokes.reduce((a,s)=>a+s.length,0)} 点。`);
 });
 
-pad.addEventListener('pointermove', event => {
-  if (drawingPointer !== event.pointerId || !activeStroke) return;
-  addPointToActive(canvasToMm(event));
-  draw();
-});
+document.getElementById('upload').onclick = async () => {
+  if(!strokes.length){log('画板没有轨迹。');return;}
+  const points = strokes.reduce((a,s)=>a+s.length,0);
+  log(`正在上传 ${strokes.length} 段，${points} 点...`);
+  uploadActive = true;
+  try{
+    const t0 = performance.now();
+    const msg = await api('/api/upload', {port:selectedPort(), strokes});
+    const dt = ((performance.now()-t0)/1000).toFixed(1);
+    log(`${msg}\n上传耗时 ${dt}s`);
+  }catch(e){
+    log('上传失败：' + e.message);
+  }finally{
+    uploadActive = false;
+  }
+};
 
-function finishDraw(event){
-  if (drawingPointer !== event.pointerId) return;
-  if (activeStroke && activeStroke.length < 2) strokes.pop();
+document.getElementById('start').onclick = async () => {
+  try{
+    const msg = await command('webstart', ['Web playback','No playable','USBSTATUS'], 4);
+    log(msg);
+    playbackActive = msg.includes('Web playback');
+  }catch(e){log('开始失败：' + e.message);}
+};
+document.getElementById('stop').onclick = async () => {
+  try{
+    log(await command('webstop', ['Web playback stopped','USBSTATUS'], 3));
+    playbackActive = false;
+  }catch(e){log('停止失败：' + e.message);}
+};
+document.getElementById('clear').onclick = () => {
+  strokes = [];
   activeStroke = null;
-  drawingPointer = null;
+  drawing = false;
   draw();
+  log('本地画板已清空。');
+};
+document.getElementById('calibrate').onclick = async () => {
+  try{log(await command('calibrate', ['USBSTATUS'], 3));}
+  catch(e){log('校准命令失败：' + e.message);}
+};
+document.getElementById('readStatus').onclick = async () => {
+  try{
+    const msg = await command('usbstatus', ['USBSTATUS'], 3);
+    updateTelemetry(msg);
+    log(msg);
+  }catch(e){log('读取失败：' + e.message);}
+};
+document.getElementById('refreshPorts').onclick = refreshPorts;
+manualPwm.oninput = () => {
+  manualPwmText.textContent = manualPwm.value;
+};
+
+async function manualAir(commandText){
+  try{
+    const msg = await command(commandText, ['AIRBITS','AIRSTATUS','AIRPWM'], 4);
+    updateTelemetry(msg);
+    log(msg);
+  }catch(e){
+    log('手动调气失败：' + e.message);
+  }
 }
-pad.addEventListener('pointerup', finishDraw);
-pad.addEventListener('pointercancel', finishDraw);
 
-$('connect').onclick = () => runTask(connect);
-$('disconnect').onclick = () => runTask(disconnect);
-$('uploadFile').onclick = () => runTask(uploadFile);
-$('uploadCanvas').onclick = () => runTask(uploadCanvas);
-$('clearCanvas').onclick = () => { strokes = []; draw(); addStatus('本地画布已清空。'); };
-$('clearBoardPath').onclick = () => runTask(() => command('clearpath', ['USBSTATUS']));
-$('loadBoardPreview').onclick = () => runTask(() => command('usbstatus', ['USBSTATUS']));
-$('start').onclick = () => runTask(() => command('webstart', ['Web playback','No playable']));
-$('stop').onclick = () => runTask(() => command('webstop', ['Web playback stopped','USBSTATUS']));
-$('loopOn').onclick = () => runTask(() => command('loopon', ['USBSTATUS loop=1']));
-$('loopOff').onclick = () => runTask(() => command('loopoff', ['USBSTATUS loop=0']));
-$('statusBtn').onclick = () => runTask(() => command('usbstatus', ['USBSTATUS']));
-$('clearLog').onclick = () => { statusEl.textContent = ''; };
-$('exportJson').onclick = () => download('trajectory.json', JSON.stringify(strokes), 'application/json');
-$('exportTxt').onclick = () => download('trajectory.txt', serializeTxt(), 'text/plain');
-fileInput.onchange = () => runTask(loadFileToCanvas);
+document.getElementById('manualInflate').onclick = () => {
+  manualAir(`airpwm ${manualPwm.value} 0`);
+};
+document.getElementById('manualDeflateSlow').onclick = () => {
+  manualAir('airbits 1 0 0');
+};
+document.getElementById('manualDeflateFast').onclick = () => {
+  manualAir('airbits 3 0 0');
+};
+document.getElementById('manualStop').onclick = () => {
+  manualAir('airbits 0 0 0');
+};
 
-for (const id of ['drawSpeed','travelSpeed','baseTorque','pullTorque']) {
-  $(id).addEventListener('input', () => updateRangeLabel(id));
-  updateRangeLabel(id);
+let speedTimer = 0;
+drawSpeed.oninput = () => {
+  drawSpeedText.textContent = drawSpeed.value;
+  clearTimeout(speedTimer);
+  speedTimer = setTimeout(async () => {
+    try{
+      const msg = await command(`speed ${drawSpeed.value}`, ['USBSTATUS'], 2.5);
+      appendLog(msg);
+    }catch(e){appendLog('速度设置失败：' + e.message);}
+  }, 160);
+};
+
+let currentTimer = 0;
+motionCurrent.oninput = () => {
+  motionCurrentText.textContent = `${motionCurrent.value}mA`;
+  clearTimeout(currentTimer);
+  currentTimer = setTimeout(async () => {
+    try{
+      const msg = await command(`current ${motionCurrent.value}`, ['USBSTATUS'], 2.5);
+      appendLog(msg);
+    }catch(e){appendLog('电机电流设置失败：' + e.message);}
+  }, 160);
+};
+
+async function pollAir(){
+  if(polling || uploadActive || !selectedPort()) return;
+  polling = true;
+  try{
+    const msg = await command('airstatus', ['AIRSTATUS'], 1.8);
+    updateTelemetry(msg);
+  }catch(e){
+    if(performance.now() - lastSampleAt > 3000) sampleRateEl.textContent = '--';
+  }
+  polling = false;
 }
-$('applyDrawSpeed').onclick = () => runTask(() => command(`speed ${$('drawSpeed').value}`, ['USBSTATUS speed=']));
-$('applyTravelSpeed').onclick = () => runTask(() => command(`travelspeed ${$('travelSpeed').value}`, ['USBSTATUS travelSpeed=']));
-$('applyTorque').onclick = () => runTask(() => command(`caltorque ${$('baseTorque').value} ${$('pullTorque').value}`, ['USBSTATUS calBase=']));
-$('enableAll').onclick = () => runTask(() => command('allenable', ['USBSTATUS allEnable=1','电机']));
-$('disableAll').onclick = () => runTask(() => command('alldisable', ['USBSTATUS allEnable=0','电机']));
-$('allPos').onclick = () => runTask(() => command('allpos', ['全部位置','USBSTATUS']));
-$('allZero').onclick = () => runTask(() => command('allzero', ['USBSTATUS allZero=1','电机']));
-$('calibrate').onclick = () => runTask(() => command('calibrate', ['USBSTATUS calibration=']));
-$('coef').onclick = () => runTask(() => command('coef', ['Current coefficients:']));
-$('gotoBtn').onclick = () => runTask(() => command(`goto ${$('gotoX').value} ${$('gotoY').value}`));
-$('ricePreset').onclick = () => runTask(() => command('ricepreset'));
 
-$('motorPos').onclick = () => runTask(() => command(`${motorId()}p`, ['电机','MOTOR']));
-$('motorEnable').onclick = () => runTask(() => command(`${motorId()}e`, ['电机']));
-$('motorDisable').onclick = () => runTask(() => command(`${motorId()}d`, ['电机']));
-$('motorZero').onclick = () => runTask(() => command(`${motorId()}c`, ['电机']));
-$('motorLock').onclick = () => runTask(() => command(`${motorId()}l`, ['电机']));
-$('motorUnlock').onclick = () => runTask(() => command(`${motorId()}u`, ['电机']));
-$('motorEncoderCal').onclick = () => runTask(() => command(`${motorId()}ca`, ['电机']));
-$('sendMotorAngle').onclick = () => runTask(() => command(`${motorId()}${$('motorAngle').value}`, ['电机']));
-$('sendMotorTorque').onclick = () => runTask(() => command(`${motorId()}t${$('motorTorque').value}`, ['电机']));
-$('setMotorId').onclick = () => runTask(() => {
-  const oldIdRaw = parseInt($('oldMotorId').value, 10);
-  const newIdRaw = parseInt($('newMotorId').value, 10);
-  if (!Number.isFinite(oldIdRaw) || !Number.isFinite(newIdRaw)) throw new Error('请输入有效的电机 ID');
-  const oldId = clamp(oldIdRaw, 1, 255);
-  const newId = clamp(newIdRaw, 1, 255);
-  if (oldId === newId) throw new Error('当前ID和新ID不能一样');
-  return command(`setid ${oldId} ${newId}`, ['SETID']);
-});
-$('sendRaw').onclick = () => runTask(() => {
-  const cmd = $('rawCommand').value.trim();
-  if (!cmd) return;
-  return command(cmd);
-});
-$('rawCommand').addEventListener('keydown', event => {
-  if (event.key === 'Enter') $('sendRaw').click();
-});
+async function pollStatusSlow(){
+  if(uploadActive || !selectedPort()) return;
+  try{
+    const msg = await command('usbstatus', ['USBSTATUS'], 2.5);
+    const speed = numValue(msg, 'speed');
+    if(Number.isFinite(speed)){
+      drawSpeed.value = speed;
+      drawSpeedText.textContent = speed;
+    }
+    const current = numValue(msg, 'motionCurrent');
+    if(Number.isFinite(current)){
+      motionCurrent.value = current;
+      motionCurrentText.textContent = `${current}mA`;
+    }
+    updateTelemetry(msg);
+  }catch(e){}
+}
 
 draw();
-window.addEventListener('beforeunload', () => {
-  try { if (writer) writer.releaseLock(); } catch (err) {}
-  try { if (serialPort) serialPort.close(); } catch (err) {}
-});
+drawAirChart();
+refreshPorts();
+setInterval(pollAir, airPollMs);
+setInterval(drawAirChart, 10);
+setInterval(refreshPorts, 3500);
+setInterval(pollStatusSlow, 5000);
 </script>
 </body>
 </html>

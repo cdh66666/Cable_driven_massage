@@ -10,3 +10,18 @@ dist/
 *.spec
 __pycache__/
 *.pyc
+
+# Local debug captures and throwaway test tools
+tools/__pycache__/
+tools/camera_probe_*.jpg
+tools/*_probe_*.jpg
+tools/air_auto_test/
+tools/auto_debug/
+tools/ball_auto_test/
+tools/ball_motion_visible/
+tools/camera_exposure_test/
+tools/motor_debug/
+run_air_pressure_test.bat
+tools/air_pressure_test.html
+tools/serial_diag.py
+tools/camera_tune.py
