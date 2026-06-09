@@ -1212,20 +1212,15 @@ class TrajectoryStudio(tk.Tk):
             import usb_debug_server  # type: ignore
 
             usb_debug_server.run(open_browser=True)
-            self.status.set("USB调试网页已启动: http://127.0.0.1:8765/")
+            self.status.set("USB调试网页已启动；如果 8765 被旧服务占用，会自动打开 8766/8767。")
         except OSError as exc:
-            text = str(exc)
-            if "10048" in text or "Address already in use" in text or "address already in use" in text:
-                webbrowser.open("http://127.0.0.1:8765/")
-                self.after(0, lambda: self.status.set("USB debug web: http://127.0.0.1:8765/"))
-            else:
-                self.after(0, lambda exc=exc: messagebox.showerror("启动失败", str(exc)))
+            self.after(0, lambda exc=exc: messagebox.showerror("启动失败", str(exc)))
         except Exception as exc:
             messagebox.showerror("启动失败", str(exc))
 
     def open_usb_debug_web(self) -> None:
         threading.Thread(target=self.run_usb_debug_server_thread, daemon=True).start()
-        self.status.set("USB调试网页已启动: http://127.0.0.1:8765/")
+        self.status.set("正在启动USB调试网页；会自动避开已被旧程序占用的端口。")
 
     def upload_to_usb(self) -> None:
         if not self.ensure_result():
@@ -1307,6 +1302,12 @@ class TrajectoryStudio(tk.Tk):
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--usb-debug":
+        import usb_debug_server  # type: ignore
+
+        usb_debug_server.run(open_browser="--no-browser" not in sys.argv)
+        return
+
     app = TrajectoryStudio()
     if len(sys.argv) > 1:
         image_path = sys.argv[1]

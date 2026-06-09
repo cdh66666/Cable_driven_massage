@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import socket
 import struct
 import sys
 import threading
@@ -23,11 +24,21 @@ CANVAS_MM = 150.0
 MAX_POINTS = 200000
 SERIAL_BOOT_WAIT = 3.0
 UPLOAD_CHUNK_BYTES = 32768
+PORT_FALLBACK_COUNT = 20
 
 
 _serial_lock = threading.Lock()
 _serial_conn: serial.Serial | None = None
 _serial_port = ""
+
+
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def find_web_html() -> Path | None:
@@ -468,11 +479,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, 400)
 
 
-def run(open_browser: bool = True, page: str = "/") -> None:
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+def create_server(preferred_port: int = PORT) -> tuple[ThreadingHTTPServer, int]:
+    last_error: OSError | None = None
+    for port in range(preferred_port, preferred_port + PORT_FALLBACK_COUNT):
+        try:
+            return ExclusiveThreadingHTTPServer((HOST, port), Handler), port
+        except OSError as exc:
+            last_error = exc
+            text = str(exc).lower()
+            if "10048" in text or "address already in use" in text or "already in use" in text:
+                continue
+            raise
+    raise OSError(f"USB debug web ports {preferred_port}-{preferred_port + PORT_FALLBACK_COUNT - 1} are all busy") from last_error
+
+
+def run(open_browser: bool = True, page: str = "/", preferred_port: int = PORT) -> None:
+    server, port = create_server(preferred_port)
     if not page.startswith("/"):
         page = "/" + page
-    url = f"http://{HOST}:{PORT}{page}"
+    url = f"http://{HOST}:{port}{page}"
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     print(f"USB debug web server: {url}")
