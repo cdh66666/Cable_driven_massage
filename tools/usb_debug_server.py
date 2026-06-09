@@ -394,7 +394,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/":
             html_path = find_web_html()
-            body = html_path.read_bytes() if html_path else INDEX_HTML.encode("utf-8")
+            if html_path is None:
+                self.send_error(500, "Missing tools/usb_debug_web.html. Please rebuild with the latest package script.")
+                return
+            body = html_path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
