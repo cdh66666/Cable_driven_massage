@@ -25,3 +25,4 @@ run_air_pressure_test.bat
 tools/air_pressure_test.html
 tools/serial_diag.py
 tools/camera_tune.py
+tools/y42_pc_process_log.jsonl
