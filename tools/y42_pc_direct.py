@@ -29,6 +29,27 @@ DEFAULT_BAUD = 115200
 FRAME_END = 0x6B
 MIN_ID = 1
 MAX_ID = 255
+OPERATING_CURRENT_MAX_MA = 2000
+
+# The web controller may install a best-effort traffic recorder.  Keeping this
+# hook optional preserves the standalone CLI and, critically, a recorder fault
+# can never interrupt a motor command or its safety reply.
+_TRAFFIC_CALLBACK = None
+
+
+def set_traffic_callback(callback) -> None:
+    global _TRAFFIC_CALLBACK
+    _TRAFFIC_CALLBACK = callback
+
+
+def _emit_traffic(record: dict) -> None:
+    callback = _TRAFFIC_CALLBACK
+    if callback is None:
+        return
+    try:
+        callback(record)
+    except Exception:
+        return
 
 
 def hex_bytes(data: bytes | bytearray | Iterable[int]) -> str:
@@ -135,38 +156,102 @@ def transact(
     first_byte_timeout: float = 0.06,
     inter_byte_quiet: float = 0.004,
     max_rx: int = 128,
+    deadline: float | None = None,
 ) -> bytes:
-    """Send one half-duplex frame and collect the complete reply."""
+    """Send a query with optional total budget, preserving even failed traffic."""
 
+    transaction_started_ns = time.perf_counter_ns()
     direction_mode = getattr(connection, "_y42_direction_mode", "auto")
-    if direction_mode == "rts-high":
-        connection.rts = True
-    elif direction_mode == "rts-low":
-        connection.rts = False
-    connection.reset_input_buffer()
-    connection.write(tx)
-    connection.flush()
-    if direction_mode in {"rts-high", "rts-low"}:
-        baudrate = float(getattr(connection, "baudrate", DEFAULT_BAUD) or DEFAULT_BAUD)
-        time.sleep(max(0.001, len(tx) * 10.0 / baudrate))
-        connection.rts = direction_mode == "rts-low"
-
     received = bytearray()
-    started = time.monotonic()
-    last_byte = started
-    while len(received) < max_rx:
-        waiting = int(getattr(connection, "in_waiting", 0) or 0)
-        chunk = connection.read(min(max_rx - len(received), waiting)) if waiting else connection.read(1)
-        if chunk:
-            received.extend(chunk)
-            last_byte = time.monotonic()
-            continue
-        now = time.monotonic()
-        if received and now - last_byte >= inter_byte_quiet:
-            break
-        if not received and now - started >= first_byte_timeout:
-            break
-    return bytes(received)
+    failure = None
+    previous_write_timeout = connection.write_timeout if deadline is not None else None
+    previous_read_timeout = connection.timeout if deadline is not None else None
+
+    def remaining_budget() -> float:
+        remaining = float(deadline) - time.perf_counter()
+        if remaining <= 0.0:
+            raise TimeoutError("串口只读检查超过时间预算")
+        return remaining
+
+    try:
+        if deadline is not None:
+            remaining_budget()
+        if direction_mode == "rts-high":
+            connection.rts = True
+        elif direction_mode == "rts-low":
+            connection.rts = False
+        connection.reset_input_buffer()
+        if deadline is not None:
+            remaining = remaining_budget()
+            bounded_write_timeout = min(
+                remaining,
+                float(previous_write_timeout) if previous_write_timeout is not None else remaining,
+            )
+            if connection.write_timeout != bounded_write_timeout:
+                connection.write_timeout = bounded_write_timeout
+        connection.write(tx)
+        # Windows flush() can block indefinitely on an unplugged driver.  A
+        # bounded query waits for the reply instead of explicitly draining TX.
+        if deadline is None:
+            connection.flush()
+        if direction_mode in {"rts-high", "rts-low"}:
+            baudrate = float(getattr(connection, "baudrate", DEFAULT_BAUD) or DEFAULT_BAUD)
+            delay = max(0.001, len(tx) * 10.0 / baudrate)
+            time.sleep(delay if deadline is None else min(delay, remaining_budget()))
+            connection.rts = direction_mode == "rts-low"
+
+        started = time.monotonic()
+        last_byte = started
+        while len(received) < max_rx:
+            if deadline is not None:
+                remaining = remaining_budget()
+                bounded_read_timeout = min(
+                    remaining,
+                    float(previous_read_timeout) if previous_read_timeout is not None else 0.001,
+                )
+                # PySerial on Windows reconfigures the port on every setter,
+                # including unchanged values. Keep the deadline without that IO.
+                if connection.timeout != bounded_read_timeout:
+                    connection.timeout = bounded_read_timeout
+            waiting = int(getattr(connection, "in_waiting", 0) or 0)
+            chunk = connection.read(min(max_rx - len(received), waiting)) if waiting else connection.read(1)
+            if chunk:
+                received.extend(chunk)
+                last_byte = time.monotonic()
+                continue
+            now = time.monotonic()
+            if received and now - last_byte >= inter_byte_quiet:
+                break
+            if not received and now - started >= first_byte_timeout:
+                break
+        return bytes(received)
+    except BaseException as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if deadline is not None:
+            try:
+                if connection.write_timeout != previous_write_timeout:
+                    connection.write_timeout = previous_write_timeout
+                if connection.timeout != previous_read_timeout:
+                    connection.timeout = previous_read_timeout
+            except (AttributeError, OSError, serial.SerialException):
+                pass
+        _emit_traffic(
+            {
+                "channel": "synchronous_transaction",
+                "port": str(getattr(connection, "port", "") or ""),
+                "baud": int(getattr(connection, "baudrate", DEFAULT_BAUD) or DEFAULT_BAUD),
+                "direction_mode": str(direction_mode),
+                "tx_hex": tx.hex(),
+                "tx_bytes": len(tx),
+                "rx_hex": bytes(received).hex(),
+                "rx_bytes": len(received),
+                "started_monotonic_ns": transaction_started_ns,
+                "completed_monotonic_ns": time.perf_counter_ns(),
+                **({"error": failure} if failure else {}),
+            }
+        )
 
 
 def valid_reply(reply: bytes, address: int, command: int, minimum: int = 4) -> bool:
@@ -241,6 +326,7 @@ def read_telemetry(
     *,
     first_byte_timeout: float = 0.06,
     inter_byte_quiet: float = 0.004,
+    deadline: float | None = None,
 ) -> Telemetry:
     telemetry = Telemetry(address)
     queries = (
@@ -258,6 +344,7 @@ def read_telemetry(
             frame(address, command, FRAME_END),
             first_byte_timeout=first_byte_timeout,
             inter_byte_quiet=inter_byte_quiet,
+            **({"deadline": deadline} if deadline is not None else {}),
         )
         if command == 0x24 and valid_reply(reply, address, command, 5):
             telemetry.voltage = read_u16(reply, 2) / 1000.0
@@ -339,8 +426,8 @@ def position_frame(address: int, direction: int, rpm: float, acceleration: int, 
 def torque_frame(address: int, direction: int, current: int, slope: int, max_rpm: float) -> bytes:
     if direction not in (0, 1):
         raise ValueError("方向必须是 0 或 1")
-    if not 0 <= current <= 5000:
-        raise ValueError("电流必须在 0..5000 mA")
+    if not 0 <= current <= OPERATING_CURRENT_MAX_MA:
+        raise ValueError(f"电流必须在 0..{OPERATING_CURRENT_MAX_MA} mA")
     if not 0 <= slope <= 65535:
         raise ValueError("斜率必须在 0..65535")
     if not 0.1 <= max_rpm <= 3000.0:

@@ -1,0 +1,1056 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Y42 · 首次接入向导</title>
+  <style>
+    :root{font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;color:#14233a;background:#edf3f9;line-height:1.45;--ink:#14233a;--muted:#607089;--line:#d3deeb;--panel:#fff;--blue:#1f5fa8;--blue-soft:#eaf3ff;--green:#167449;--green-soft:#eaf8f0;--amber:#9a5b08;--amber-soft:#fff6df;--red:#a83232;--red-soft:#fff0f0;--shadow:0 12px 30px rgba(35,67,103,.08)}
+    *{box-sizing:border-box}
+    body{margin:0;min-width:320px;background:linear-gradient(135deg,#eef5fb 0%,#f8fbfd 52%,#eef4fa 100%)}
+    button,select,input{font:inherit}
+    button{border:1px solid #b9cbe0;border-radius:10px;background:#fff;color:var(--ink);min-height:40px;padding:8px 14px;font-weight:750;cursor:pointer}
+    button:hover:not(:disabled){border-color:var(--blue);box-shadow:0 3px 10px rgba(31,95,168,.12)}
+    button:disabled{opacity:.48;cursor:not-allowed}
+    button.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+    button.good{background:var(--green);border-color:var(--green);color:#fff}
+    button.warn{background:#fff3d6;border-color:#e3b24f;color:#714306}
+    button.danger{background:#fff0f0;border-color:#df9696;color:#8c2727}
+    button.ghost{background:transparent}
+    select,input[type=text]{min-height:40px;border:1px solid #b9cbe0;border-radius:10px;padding:7px 10px;background:#fff;color:var(--ink)}
+    .shell{max-width:1800px;margin:0 auto;padding:24px 30px 42px}
+    .hero{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:18px}
+    .kicker,.eyebrow{font-size:12px;font-weight:850;letter-spacing:.12em;color:var(--blue);text-transform:uppercase}
+    h1{font-size:clamp(28px,3vw,48px);line-height:1.05;margin:7px 0 10px;color:#10223a}
+    h2{font-size:23px;line-height:1.15;margin:0 0 8px}
+    h3{font-size:16px;margin:0 0 6px}
+    p{margin:7px 0;color:var(--muted)}
+    .hero p{font-size:17px;max-width:850px}
+    .badges{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+    .badge{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 11px;font-size:13px;font-weight:850;background:#e8eef6;color:#3c526b;border:1px solid #c9d5e3;white-space:nowrap}
+    .badge.demo{background:#fff0c9;border-color:#e9bc56;color:#754b05}
+    .badge.readonly{background:#e7f2ff;border-color:#a7c7e9;color:#1c568e}
+    .badge.safe{background:var(--green-soft);border-color:#a9d9bd;color:var(--green)}
+    .badge.move{background:var(--red-soft);border-color:#e4a1a1;color:var(--red)}
+    .notice{background:var(--amber-soft);border:1px solid #e4bd67;border-left:6px solid #d28b17;border-radius:14px;padding:15px 18px;margin:0 0 16px;box-shadow:var(--shadow)}
+    .notice strong{color:#6f4507}
+    .notice ul{margin:7px 0 0 20px;padding:0;color:#624b23}
+    .toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:9px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin-bottom:16px;box-shadow:var(--shadow)}
+    .toolbar .label{font-weight:850;margin-right:2px}
+    .toolbar .spacer{flex:1}
+    .read-only-note{font-size:13px;color:#345879;background:var(--blue-soft);border:1px solid #c3d9f0;border-radius:9px;padding:7px 10px}
+    .global-status{min-height:44px;display:flex;align-items:center;gap:9px;border-radius:12px;padding:10px 14px;margin-bottom:16px;background:#f5f8fb;border:1px solid var(--line);color:#465c74}
+    .global-status.ok{background:var(--green-soft);border-color:#b7dec6;color:#236843}
+    .global-status.blocked{background:var(--red-soft);border-color:#e6b3b3;color:#8a3030}
+    .layout{display:grid;grid-template-columns:265px minmax(0,1fr);gap:18px;align-items:start}
+    .steps,.step-card,.draw-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+    .steps{padding:15px;position:sticky;top:14px}
+    .steps h2{font-size:17px;margin-bottom:10px}
+    .step-nav{display:grid;gap:7px}
+    .step-nav button{display:grid;grid-template-columns:30px 1fr;gap:9px;text-align:left;align-items:center;min-height:54px;background:#f8fbfe;border-color:#dbe5ef;padding:8px 10px}
+    .step-nav button.active{background:var(--blue-soft);border-color:#9bc1e9;color:#124f8c}
+    .step-nav button.done{background:var(--green-soft);border-color:#b4dcc3;color:#1e6944}
+    .step-no{width:25px;height:25px;display:grid;place-items:center;border-radius:50%;font-size:13px;font-weight:900;background:#e2eaf3;color:#405a73}
+    .active .step-no{background:var(--blue);color:#fff}.done .step-no{background:var(--green);color:#fff}
+    .step-nav small{display:block;color:var(--muted);font-weight:500;margin-top:2px}
+    .content{display:grid;gap:16px}
+    .step-card,.draw-card{padding:20px}
+    .step-head{display:flex;justify-content:space-between;gap:15px;align-items:flex-start;margin-bottom:13px}
+    .step-head p{margin:3px 0 0}
+    .state-pill{font-size:12px;font-weight:900;border-radius:999px;padding:5px 9px;background:#eef2f6;color:#55677c;white-space:nowrap}
+    .state-pill.ready{background:var(--green-soft);color:var(--green)}
+    .state-pill.blocked{background:var(--red-soft);color:var(--red)}
+    .state-pill.demo{background:#fff1c8;color:#754b05}
+    .explain{border:1px solid #d9e4ef;background:#f8fbfe;border-radius:11px;padding:11px 13px;color:#476078;font-size:14px}
+    .explain strong{color:var(--ink)}
+    .grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .metric{border:1px solid var(--line);border-radius:11px;padding:11px;background:#fbfdff}
+    .metric .label{font-size:12px;color:var(--muted)}
+    .metric .value{font-size:20px;font-weight:900;margin-top:2px}
+    .metric.alert{border-color:#e2aeae;background:#fff8f8}.metric.good{border-color:#b7dcc6;background:#f5fcf7}
+    .check-list{display:grid;gap:8px;margin:12px 0}
+    .check{display:flex;align-items:flex-start;gap:9px;border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:#fff}
+    .check .icon{font-weight:900;color:#8190a1}.check.ok{border-color:#b6dbc4;background:#f5fcf7}.check.ok .icon{color:var(--green)}.check.bad{border-color:#e2b0b0;background:#fff8f8}.check.bad .icon{color:var(--red)}
+    .check small{display:block;color:var(--muted);margin-top:2px}
+    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:11px;margin:12px 0}
+    table{width:100%;border-collapse:collapse;min-width:670px;background:#fff}
+    th,td{padding:10px 11px;border-bottom:1px solid #e6edf4;text-align:left;vertical-align:middle;font-size:14px}
+    th{font-size:12px;color:#5c7087;background:#f5f8fb;white-space:nowrap}
+    tr:last-child td{border-bottom:0}
+    .row-tag{display:inline-flex;align-items:center;gap:6px;font-weight:850}.dot{width:9px;height:9px;border-radius:50%;background:#a7b2be;display:inline-block}.dot.green{background:#2a9b62}.dot.red{background:#ce4b4b}.dot.amber{background:#d28b17}
+    .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.actions button{min-height:38px}
+    .confirm-box{display:grid;gap:8px;margin-top:11px;padding:11px 13px;border:1px solid #e0ba68;border-radius:11px;background:#fff9e9;color:#694c16;font-size:13px}
+    .confirm-box label{display:flex;gap:8px;align-items:flex-start;font-weight:750}.confirm-box input{margin-top:3px;accent-color:var(--blue)}
+    .real-controls{display:grid;gap:8px;margin-top:10px;padding:10px 12px;border:1px solid #c5d9ec;border-radius:11px;background:#f5faff}
+    .real-controls .actions{margin-top:0}.real-controls button{font-size:13px}
+    .real-only{display:none}
+    body.real-mode .real-only{display:grid}
+    .field-row{display:flex;flex-wrap:wrap;align-items:center;gap:7px}.field-row label{font-weight:750}.field-row input{width:100px}
+    .real-stop{margin-left:4px}.real-stop.hidden{display:none}
+    .muted{font-size:13px;color:var(--muted)}
+    .danger-note{color:#8b3030;background:var(--red-soft);border:1px solid #e3b0b0;border-radius:10px;padding:9px 11px;font-size:13px}
+    .safe-note{color:#216745;background:var(--green-soft);border:1px solid #b5dbc4;border-radius:10px;padding:9px 11px;font-size:13px}
+    .move-note{color:#8c3030;background:#fff5f5;border:1px solid #e6abab;border-radius:10px;padding:9px 11px;font-size:13px}
+    .scenario-note{font-weight:800;color:#6d4b0d;margin-top:9px}
+    .canvas-box{display:grid;grid-template-columns:minmax(260px,520px) minmax(220px,1fr);gap:16px;align-items:start}
+    canvas{width:100%;aspect-ratio:110/148;border:1px solid #b9cbe0;border-radius:11px;background:#fbfdff;touch-action:none;display:block}
+    .canvas-side{display:grid;gap:9px}
+    .legend{display:grid;gap:6px;font-size:13px;color:#53677d}.legend span{display:flex;align-items:center;gap:7px}.legend i{width:22px;height:4px;border-radius:99px;display:inline-block}.legend .blue{background:#276bc0}.legend .orange{background:#c87f25}.legend .green{background:#1d9a5d}
+    .log{white-space:pre-wrap;max-height:180px;overflow:auto;background:#101b2a;color:#d7e8f8;border-radius:10px;padding:11px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:12px}
+    .hidden{display:none!important}
+    .footer{margin-top:18px;color:#718299;font-size:12px;text-align:center}
+    @media(max-width:1050px){.layout{grid-template-columns:1fr}.steps{position:static}.step-nav{grid-template-columns:repeat(3,minmax(0,1fr))}.canvas-box{grid-template-columns:1fr}.hero{flex-direction:column}.badges{justify-content:flex-start}}
+    @media(max-width:650px){.shell{padding:15px}.grid-2,.grid-3{grid-template-columns:1fr}.step-nav{grid-template-columns:1fr}.toolbar{align-items:stretch}.toolbar button,.toolbar select{width:100%}.toolbar .spacer{display:none}.hero p{font-size:15px}}
+  </style>
+</head>
+<body>
+<main class="shell" id="app">
+  <header class="hero">
+    <div>
+      <div class="kicker">Y42 / FIRST CONNECTION</div>
+      <h1>首次接入向导</h1>
+      <p>把“哪台电机、什么速率、方向是否正确、能不能校准和画图”一次说清楚。每一步只回答一个问题。</p>
+    </div>
+    <div class="badges" aria-label="当前模式">
+      <span class="badge demo" id="modeBadge">离线演示</span>
+      <span class="badge safe" id="motionBadge">实机运动：未允许</span>
+    </div>
+  </header>
+
+  <section class="notice" aria-label="重复 ID 安全提示">
+    <strong>先看这一条：四台默认同一个 ID 时，不能把四台同时接在总线上安全区分。</strong>
+    <ul>
+      <li>先只接一台，读到当前 ID 和波特率，再完成写入后的断电重启回读；演示状态只是教学，真实动作必须逐项确认。</li>
+    </ul>
+  </section>
+
+  <section class="toolbar" aria-label="向导模式">
+    <span class="label">查看方式</span>
+    <button id="demoMode" class="primary">离线演示</button>
+    <button id="realMode" class="ghost">真实服务（需确认）</button>
+    <select id="scenarioSelect" aria-label="演示状态">
+      <option value="notConnected">演示：未接入</option>
+      <option value="duplicateId" selected>演示：重复 ID</option>
+      <option value="mixedBaud">演示：混合波特率</option>
+      <option value="directionUnset">演示：方向未测试</option>
+      <option value="calibrationInvalid">演示：标定失效</option>
+      <option value="normal">演示：可正常绘制</option>
+    </select>
+    <button id="refreshButton" class="ghost">读取状态</button>
+    <button id="realStopButton" class="danger real-stop hidden">急停（随时可用）</button>
+    <span class="spacer"></span>
+    <span class="read-only-note" id="modeNote">演示数据，不代表真实电机；不会发送请求。</span>
+  </section>
+
+  <div id="globalStatus" class="global-status" role="status" aria-live="polite">正在加载离线演示：默认重复 ID。</div>
+
+  <div class="layout">
+    <aside class="steps" aria-label="接入步骤">
+      <h2>六步完成一次接入</h2>
+      <nav class="step-nav">
+        <button data-jump="connect" class="active"><span class="step-no">1</span><span>连接诊断<small>先确认能不能安全识别</small></span></button>
+        <button data-jump="identity"><span class="step-no">2</span><span>逐台身份<small>同 ID 不能共接扫描</small></span></button>
+        <button data-jump="baud"><span class="step-no">3</span><span>统一波特率<small>只在身份明确后处理</small></span></button>
+        <button data-jump="direction"><span class="step-no">4</span><span>方向确认<small>低幅动作，逐台确认</small></span></button>
+        <button data-jump="calibration"><span class="step-no">5</span><span>校准安全门<small>完整校准会运动</small></span></button>
+        <button data-jump="draw"><span class="step-no">6</span><span>画图验收<small>先预览，再申请运动</small></span></button>
+      </nav>
+    </aside>
+
+    <section class="content">
+      <section class="step-card" id="step-connect" data-step="connect">
+        <div class="step-head"><div><div class="eyebrow">STEP 1 · CONNECT</div><h2>连接诊断</h2><p>只读检查串口、电机在线情况和“是否可能共用 ID”。</p></div><span id="connectPill" class="state-pill">待检查</span></div>
+        <div class="grid-3" id="connectMetrics"></div>
+        <div id="connectChecks" class="check-list"></div>
+        <div id="connectScenarioNote" class="scenario-note"></div>
+        <div class="confirm-box real-only">
+          <label><input id="prepareSafetyConfirm" type="checkbox">我确认机构无人接触；连接准备只扫描、核对并失能，不会执行绘制。</label>
+          <div class="actions"><button id="prepareRealButton" class="warn">真实连接并自动准备（身份/速率确认后）</button></div>
+          <div class="muted">重复 ID 或单台接入时先完成逐台身份和波特率；真实准备放在身份/速率处理后，可能锁定实体按键并暂时失能。没有勾选确认时不会发送请求。</div>
+        </div>
+        <div class="actions"><button id="connectNext" class="primary">进入逐台身份</button><button id="connectExplain" class="ghost">为什么不能四台一起扫？</button></div>
+      </section>
+
+      <section class="step-card" id="step-identity" data-step="identity">
+        <div class="step-head"><div><div class="eyebrow">STEP 2 · IDENTITY</div><h2>逐台分配身份</h2><p>一次只接一台，给它一个明确的机械位置标签。真实写入必须由主控确认。</p></div><span id="identityPill" class="state-pill">未完成</span></div>
+        <div class="explain"><strong>操作顺序：</strong>断开其他三台 → 勾选“当前只接一台” → 读回当前 ID 和波特率 → 必要时写入目标 ID → 断电重启这一台 → 再回读目标 ID。演示按钮只改变页面状态；真实写入按行完成，不能跳过回读。</div>
+        <div class="confirm-box real-only">
+          <label><input id="onlyOneConnected" type="checkbox">我确认现在只接了当前这一台，其他三台已经断开。</label>
+          <div class="muted">重复 ID 时尤其重要：四台共接无法知道哪一台响应，向导会拒绝写入。</div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>机械位置</th><th>读到的 ID</th><th>读到的波特率</th><th>处理状态</th><th>操作</th></tr></thead><tbody id="identityRows"></tbody></table></div>
+        <div id="identityWarning" class="danger-note"></div>
+        <div class="actions"><button id="identityReset" class="ghost">重置本次演示记录</button><button id="identityNext" class="primary">进入波特率</button></div>
+      </section>
+
+      <section class="step-card" id="step-baud" data-step="baud">
+        <div class="step-head"><div><div class="eyebrow">STEP 3 · BAUD</div><h2>统一波特率</h2><p>身份明确后再统一电脑端和电机内部速率。当前模块不写入硬件。</p></div><span id="baudPill" class="state-pill">未完成</span></div>
+        <div class="grid-2"><div><div class="table-wrap"><table><thead><tr><th>位置</th><th>当前回报</th><th>备注</th></tr></thead><tbody id="baudRows"></tbody></table></div></div><div><label for="targetBaud"><strong>教学目标速率</strong></label><select id="targetBaud"><option>115200</option><option>921600</option><option>57600</option></select><p class="muted">如果看到混合速率，先停在这里。真实写入会让电机短暂失联，主控会在写入后回读验证。</p><div id="baudActionNote" class="move-note">配置动作：会写入电机（当前只演示，不执行）。</div><div class="confirm-box real-only"><label><input id="baudConfirm" type="checkbox">我确认四台身份均已逐台回读，现场无人接触；统一速率期间短暂失联是可以接受的。</label></div><div class="actions"><button id="baudDemoButton" class="warn">演示：统一波特率</button></div></div></div>
+        <div class="actions"><button id="baudNext" class="primary">进入方向确认</button></div>
+      </section>
+
+      <section class="step-card" id="step-direction" data-step="direction">
+        <div class="step-head"><div><div class="eyebrow">STEP 4 · DIRECTION</div><h2>低幅方向确认</h2><p>每台只做一次小幅、可停止的方向确认；看机械位置，不凭猜测保存。</p></div><span id="directionPill" class="state-pill">未完成</span></div>
+        <div class="move-note"><strong>将运动：</strong>真实方向确认会逐台发送约 45°、8 RPM 的低幅动作，只用于看清方向，不能当作完整校准。急停按钮始终保留；没有勾选确认不会调用写接口。</div>
+        <div class="confirm-box real-only"><label><input id="directionConfirm" type="checkbox">我确认当前只测试一台，约 45° 低幅运动范围内无人接触，急停可触达。</label></div>
+        <div class="table-wrap"><table><thead><tr><th>位置</th><th>当前方向</th><th>动作结果</th><th>操作</th></tr></thead><tbody id="directionRows"></tbody></table></div>
+        <div id="directionWarning" class="danger-note"></div>
+        <div class="actions"><button id="directionNext" class="primary">进入校准安全门</button></div>
+      </section>
+
+      <section class="step-card" id="step-calibration" data-step="calibration">
+        <div class="step-head"><div><div class="eyebrow">STEP 5 · CALIBRATION</div><h2>校准安全门</h2><p>校准不是“点一下就完事”：它会建立当前张力下的几何基准。</p></div><span id="calibrationPill" class="state-pill">未完成</span></div>
+        <div class="grid-2"><div id="calibrationSummary" class="check-list"></div><div><div class="move-note"><strong>将运动：</strong>保存模型快速恢复可能发送张力指令；完整四角校准会让电机运动到角点并建立基准。保存模型失败时不会自动进入完整校准，必须由操作者另行确认。</div><div class="confirm-box real-only"><label><input id="savedCalibrationConfirm" type="checkbox">我确认机构无人接触、急停可用；只尝试恢复已保存模型。</label><label><input id="fullCalibrationConfirm" type="checkbox">我确认完整四角校准会运动，现场已清空且急停可触达。</label></div><div class="actions"><button id="calibrationDemoButton" class="warn">演示：标定完成</button><button id="calibrationSavedButton" class="danger">真实恢复保存模型</button><button id="calibrationFullButton" class="danger">真实完整四角校准</button><button id="calibrationPreviewButton" class="ghost">只看校准说明</button></div><p id="calibrationActionNote" class="muted"></p></div></div>
+        <div class="actions"><button id="calibrationNext" class="primary">进入画图验收</button></div>
+      </section>
+
+      <section class="draw-card" id="step-draw" data-step="draw">
+        <div class="step-head"><div><div class="eyebrow">STEP 6 · DRAW</div><h2>画图验收</h2><p>先用画布确认路径，再决定是否把路径交给主控。</p></div><span id="drawPill" class="state-pill">仅预览</span></div>
+        <div class="canvas-box"><div><canvas id="previewCanvas" width="550" height="740" aria-label="轨迹预览画布"></canvas><div class="actions"><button id="loadPreviewButton" class="ghost">载入验收图（仅预览）</button><button id="runDemoButton" class="primary">演示绘制（不驱动电机）</button></div><div class="confirm-box real-only"><label><input id="drawConfirm" type="checkbox">我确认校准已通过、区域无人接触、急停可用；真实运行会把轨迹交给主控。</label></div><div id="drawActionNote" class="safe-note">当前只画在网页画布；不会调用 `/api/path`。</div></div><div class="canvas-side"><div class="legend"><span><i class="blue"></i>蓝：输入/预览</span><span><i class="orange"></i>橙：目标路径</span><span><i class="green"></i>绿：演示进度</span></div><div id="drawChecks" class="check-list"></div><div class="explain"><strong>完成条件：</strong>身份已明确、波特率一致、四台方向已确认、校准安全门通过。真实绘制保留主控安全门，并且必须由本页再次确认运动安全。</div><div class="log" id="eventLog" aria-live="polite">[向导] 等待开始。</div></div></div>
+      </section>
+    </section>
+  </div>
+  <div class="footer">这是接入教学与只读诊断草案。演示状态明确标注“演示”，不代表真实设备已通过；视频脚本另见 tools/y42_onboarding_teaching_script.md。</div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const MOTOR_LABELS = ['左上','右上','右下','左下'];
+  const TARGET_IDS = [1,2,3,4];
+  const TARGET_BAUD = 115200;
+  const SUPPORTED_BAUDS = [9600,19200,25000,38400,57600,115200,256000,512000,921600];
+  const CALIBRATION_BODY = {side:148,ball:40,strong:1500,weak:300,trajectory_current:2000,confirmed:true};
+  const SCENARIOS = {
+    notConnected: {label:'未接入', ports:0, identity:'none', baud:[null,null,null,null], directions:['unset','unset','unset','unset'], calibration:'invalid', message:'没有串口或没有电机回包。'},
+    duplicateId: {label:'重复 ID', ports:1, identity:'duplicate', ids:[1,1,1,1], baud:[115200,115200,115200,115200], directions:['unset','unset','unset','unset'], calibration:'invalid', message:'四台演示设备仍共用 ID 1，不能安全区分。'},
+    mixedBaud: {label:'混合波特率', ports:1, identity:'unique', ids:[1,2,3,4], baud:[115200,115200,921600,115200], directions:['unset','unset','unset','unset'], calibration:'invalid', message:'M3 演示为 921600，其余为 115200；先统一速率。'},
+    directionUnset: {label:'方向未测试', ports:1, identity:'unique', ids:[1,2,3,4], baud:[115200,115200,115200,115200], directions:['unset','unset','unset','unset'], calibration:'invalid', message:'四台身份和速率已明确，但方向还没有逐台确认。'},
+    calibrationInvalid: {label:'标定失效', ports:1, identity:'unique', ids:[1,2,3,4], baud:[115200,115200,115200,115200], directions:['forward','forward','reverse','forward'], calibration:'invalid', message:'方向已记录，但保存的几何模型不可用于本次会话。'},
+    normal: {label:'可正常绘制', ports:1, identity:'unique', ids:[1,2,3,4], baud:[115200,115200,115200,115200], directions:['forward','forward','reverse','forward'], calibration:'valid', message:'演示流程已具备绘图条件。'}
+  };
+  const state = {
+    mode:'demo', scenario:'duplicateId', snapshot:null,
+    identityDone:[false,false,false,false],
+    identityRecords:[],
+    baudDone:false,
+    directions:[null,null,null,null],
+    directionTested:[false,false,false,false],
+    calibrationDone:false,
+    path:[], progress:0, running:false, logs:[], banner:''
+  };
+  const real = {
+    ports:null, auto:null, status:null, error:'',
+    hostBaud:null,
+    prepareOk:false, identityBusy:false, baudBusy:false,
+    directionBusy:false, calibrationBusy:false, drawBusy:false
+  };
+  const scenario = () => SCENARIOS[state.scenario];
+  const demoMode = () => state.mode === 'demo';
+  const all = list => list.every(Boolean);
+  const checked = id => Boolean($(id)?.checked);
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const formatBaud = value => value ? String(value) : '未回读';
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function log(message) {
+    state.logs.unshift('[' + new Date().toLocaleTimeString('zh-CN',{hour12:false}) + '] ' + message);
+    state.logs = state.logs.slice(0,18);
+    if ($('eventLog')) $('eventLog').textContent = state.logs.join('\n');
+  }
+  function setGlobal(text, kind='') {
+    $('globalStatus').className = 'global-status' + (kind ? ' ' + kind : '');
+    $('globalStatus').textContent = text;
+  }
+  function makeIdentityRecords() {
+    return MOTOR_LABELS.map(() => ({
+      sourceId:null, sourceBaud:null, read:false,
+      writeAccepted:false, rebooted:false, verified:false
+    }));
+  }
+  function realPort() {
+    const ports = real.ports?.ports;
+    if (!Array.isArray(ports) || !ports.length) return '';
+    const first = ports[0];
+    return typeof first === 'string' ? first : String(first.device || first.port || first.name || '');
+  }
+  function realHostBaud() {
+    const selected = Number(real.hostBaud);
+    if (SUPPORTED_BAUDS.includes(selected)) return selected;
+    const remembered = Number(real.auto?.baud);
+    if (SUPPORTED_BAUDS.includes(remembered)) return remembered;
+    const first = state.identityRecords.find(record => SUPPORTED_BAUDS.includes(Number(record.sourceBaud)));
+    return first ? Number(first.sourceBaud) : TARGET_BAUD;
+  }
+  function realIdle() {
+    const current = String(real.auto?.auto ?? '').toLowerCase();
+    return !current || ['idle','ready','error','none'].includes(current);
+  }
+  function realMotionReady() {
+    return !demoMode() && real.prepareOk && real.auto?.control_unlocked === true && realIdle();
+  }
+  function realCalibrationReady() {
+    const c = real.auto?.calibration || {};
+    return c.valid === true && c.session_local_verified === true &&
+      c.session_tension_held === true && realIdle();
+  }
+  function directionReady(index) {
+    return Boolean(real.auto?.direction_ready?.[String(TARGET_IDS[index])]?.completed);
+  }
+  function sameReadBaud() {
+    const values = state.identityRecords.map(record => Number(record.sourceBaud));
+    return values.every(value => SUPPORTED_BAUDS.includes(value)) &&
+      values.every(value => value === values[0]);
+  }
+  function updateIdentityDone() {
+    state.identityDone = state.identityRecords.map(record => Boolean(record.verified));
+  }
+  function activeData() {
+    if (demoMode()) return scenario();
+    const a = real.auto || {};
+    const c = a.calibration || {};
+    const motors = Array.isArray(real.status?.motors) ? real.status.motors : [];
+    return {
+      label:'真实服务需确认',
+      ports:Array.isArray(real.ports?.ports) ? real.ports.ports.length : 0,
+      identity:'unknown',
+      ids:motors.map(motor => motor.id),
+      baud:state.identityRecords.map(record => record.sourceBaud || null),
+      directions:state.directions.map(value => value || 'unset'),
+      calibration:realCalibrationReady() ? 'valid' : 'invalid',
+      message:real.error || a.message || '真实状态已读取；逐台证据仍需本页确认'
+    };
+  }
+  function resetProgressForScenario() {
+    const d = activeData();
+    state.identityRecords = makeIdentityRecords();
+    if (demoMode()) {
+      const unique = d.identity === 'unique';
+      state.identityDone = unique ? [true,true,true,true] : [false,false,false,false];
+      state.identityRecords = MOTOR_LABELS.map((_, index) => ({
+        sourceId:d.ids?.[index] ?? (d.identity === 'duplicate' ? 1 : null),
+        sourceBaud:d.baud?.[index] ?? null,
+        read:unique, writeAccepted:unique, rebooted:unique, verified:unique
+      }));
+      state.baudDone = unique && d.baud.every(value => value === d.baud[0]);
+      state.directions = d.directions.map(value => value === 'unset' ? null : value);
+      state.directionTested = state.directions.map(Boolean);
+      state.calibrationDone = d.calibration === 'valid';
+    } else {
+      state.identityDone = [false,false,false,false];
+      state.baudDone = false;
+      state.directions = [null,null,null,null];
+      state.directionTested = [false,false,false,false];
+      state.calibrationDone = false;
+    }
+    state.path = []; state.progress = 0; state.running = false; state.banner = '';
+  }
+  function renderMode() {
+    const demo = demoMode();
+    document.body.classList.toggle('real-mode', !demo);
+    $('modeBadge').textContent = demo ? '离线演示' : '真实服务（需确认）';
+    $('modeBadge').className = 'badge ' + (demo ? 'demo' : 'readonly');
+    const unlocked = !demo && real.auto?.control_unlocked === true;
+    $('motionBadge').textContent = demo ? '实机运动：未允许' : unlocked ? '实机运动：后台安全门已开' : '实机运动：后台仍锁定';
+    $('motionBadge').className = 'badge ' + (unlocked ? 'move' : 'safe');
+    $('scenarioSelect').disabled = !demo;
+    $('scenarioSelect').classList.toggle('hidden', !demo);
+    $('demoMode').className = demo ? 'primary' : 'ghost';
+    $('realMode').className = demo ? 'ghost' : 'primary';
+    $('realStopButton').classList.toggle('hidden', demo);
+    $('modeNote').textContent = demo
+      ? '演示数据，不代表真实电机；不会发送请求。'
+      : '真实模式：先 GET 读取状态；每个 POST 都需要本页对应确认。急停始终可用，不能绕过后台安全门。';
+  }
+  function renderConnect(d) {
+    const connected = d.ports > 0;
+    const duplicate = demoMode() && d.identity === 'duplicate' && !all(state.identityDone);
+    const prepared = !demoMode() && real.prepareOk;
+    $('connectPill').textContent = !connected ? '未接入' : duplicate ? '重复 ID' : prepared ? '已准备' : demoMode() ? '已接入' : '需准备';
+    $('connectPill').className = 'state-pill ' + (!connected || duplicate || (!demoMode() && !prepared) ? 'blocked' : 'ready');
+    $('connectMetrics').innerHTML = [
+      ['串口',connected ? (demoMode() ? 'COM5（演示）' : d.ports + ' 个端口') : '未发现',connected ? '' : 'alert'],
+      ['在线回报',connected ? (demoMode() ? '四台（演示）' : ((real.status?.motors || []).filter(motor => motor.online !== false).length + ' 台')) : '0 台',connected ? 'good' : 'alert'],
+      ['身份证据',duplicate ? '四台同 ID' : demoMode() ? '可逐台记录' : all(state.identityDone) ? '四台已回读' : '仍需逐台回读',duplicate ? 'alert' : 'good']
+    ].map(([label,value,klass]) => '<div class="metric ' + klass + '"><div class="label">' + label + '</div><div class="value">' + esc(value) + '</div></div>').join('');
+    $('connectChecks').innerHTML = [
+      ['串口存在',connected,connected ? '已发现串口；仍需按顺序接入。' : '请插入 USB-RS485，并检查电源和 A/B 线。'],
+      ['重复 ID 安全门',!duplicate,duplicate ? '四台共用同一个 ID，不能同时扫描或写入。' : demoMode() ? '演示状态可继续逐台记录。' : '真实服务不提供隔离证明，必须逐台确认。'],
+      ['连接准备',demoMode() || prepared,demoMode() ? '演示不会准备硬件。' : prepared ? '主控准备已完成；写 ID 后可能需要再次准备。' : '勾选安全确认后执行“连接并自动准备”。']
+    ].map(([label,ok,text]) => '<div class="check ' + (ok ? 'ok' : 'bad') + '"><span class="icon">' + (ok ? '✓' : '!') + '</span><div><strong>' + esc(label) + '</strong><small>' + esc(text) + '</small></div></div>').join('');
+    $('connectScenarioNote').textContent = d.message || '';
+    const identityAndBaudReady = all(state.identityDone) && state.baudDone;
+    $('prepareRealButton').disabled = demoMode() || !connected || !identityAndBaudReady || !checked('prepareSafetyConfirm') || (prepared && real.auto?.control_unlocked === true);
+    $('prepareRealButton').textContent = prepared && real.auto?.control_unlocked === true ? '已准备（可重新读取）' : '真实连接并自动准备（会失能）';
+    $('connectNext').disabled = !connected;
+    if (!connected) setGlobal('请先接入设备；当前没有任何写入或运动动作。','blocked');
+    else if (duplicate) setGlobal('演示仍是重复 ID：先逐台记录，不能四台一起写。','blocked');
+    else if (!demoMode() && !all(state.identityDone)) setGlobal('真实设备已发现；先进入逐台身份，一次只接一台并读回 ID 与波特率。','blocked');
+    else if (!demoMode() && !state.baudDone) setGlobal('四台身份已回读；现在统一波特率，完成后再做连接准备和低幅动作。','blocked');
+    else if (!demoMode() && !prepared) setGlobal('身份和波特率已完成；勾选安全确认后执行连接准备，再做方向动作。','blocked');
+    else setGlobal('连接诊断通过，可以继续。','ok');
+  }
+  function identityStatus(record,index) {
+    if (record.verified) return '已回读目标 ID ' + TARGET_IDS[index];
+    if (record.writeAccepted && record.sourceId !== TARGET_IDS[index]) {
+      return record.rebooted ? '已确认断电重启，等待回读' : '已收到 ACK；请断电重启当前这一台';
+    }
+    if (record.read) return record.sourceId === TARGET_IDS[index] ? '当前已是目标 ID，等待回读确认' : '已读取，可写入目标 ID ' + TARGET_IDS[index];
+    return '只接这一台后读取';
+  }
+  function renderIdentity(d) {
+    const duplicate = demoMode() && d.identity === 'duplicate';
+    $('identityPill').textContent = all(state.identityDone) ? '已完成' : duplicate ? '逐台处理' : '待记录';
+    $('identityPill').className = 'state-pill ' + (all(state.identityDone) ? 'ready' : 'blocked');
+    $('identityRows').innerHTML = MOTOR_LABELS.map((label,index) => {
+      const record = state.identityRecords[index];
+      const done = state.identityDone[index];
+      const readId = demoMode() ? (duplicate ? (done ? TARGET_IDS[index] : 1) : (d.ids?.[index] ?? '—')) : (record.sourceId ?? '—');
+      const baud = demoMode() ? formatBaud(d.baud?.[index]) : formatBaud(record.sourceBaud);
+      let actions;
+      if (demoMode()) {
+        actions = '<button class="identity-demo" data-index="' + index + '">' + (done ? '已记录（演示）' : '演示：记录 M' + (index + 1)) + '</button>';
+      } else {
+        const same = record.read && Number(record.sourceId) === TARGET_IDS[index];
+        const reboot = record.writeAccepted && !same
+          ? '<label class="muted"><input id="reboot-confirm-' + index + '" class="reboot-confirm" data-index="' + index + '" type="checkbox" ' + (record.rebooted ? 'checked' : '') + '> 已断电重启此台</label>' : '';
+        actions = '<div class="actions">' +
+          '<button class="identity-read" data-index="' + index + '" ' + (real.identityBusy || !checked('onlyOneConnected') ? 'disabled' : '') + '>读取当前 ID + 波特率（只读）</button>' +
+          '<button class="identity-write" data-index="' + index + '" ' + (real.identityBusy || !record.read || !record.sourceBaud || same || !checked('onlyOneConnected') ? 'disabled' : '') + '>' + (same ? '无需写入（已是目标 ID）' : '写入目标 ID（需断电）') + '</button>' +
+          reboot +
+          '<button class="identity-verify" data-index="' + index + '" ' + (real.identityBusy || !record.read || (!same && (!record.writeAccepted || !record.rebooted)) ? 'disabled' : '') + '>回读目标 ID</button>' +
+          '</div>';
+      }
+      return '<tr><td><span class="row-tag"><i class="dot ' + (done ? 'green' : duplicate ? 'red' : 'amber') + '"></i>M' + (index + 1) + ' · ' + label + '</span></td>' +
+        '<td><input class="current-id" type="text" value="' + esc(readId) + '" readonly aria-label="M' + (index + 1) + ' 当前 ID"></td>' +
+        '<td><strong>' + esc(baud) + '</strong></td><td>' + esc(identityStatus(record,index)) + '</td><td>' + actions + '</td></tr>';
+    }).join('');
+    if (demoMode()) {
+      $('identityWarning').textContent = duplicate && !all(state.identityDone)
+        ? '重复 ID 仍未拆开：不要在四台共接时点击任何写入。演示按钮只记录教学进度。'
+        : '演示已按逐台顺序记录；真实模式必须读 ID、读波特率、写入后断电重启并回读。';
+    } else if (!checked('onlyOneConnected')) {
+      $('identityWarning').textContent = '请先勾选“当前只接一台”。未勾选时所有真实读写按钮都保持关闭。';
+    } else if (!all(state.identityDone)) {
+      $('identityWarning').textContent = '真实写入顺序固定为：scan → baud-sweep →（必要时）set-id → 断电重启勾选 → scan 回读。';
+    } else {
+      $('identityWarning').textContent = '四台目标 ID 均已逐台回读。若刚写过 ID，主控仍可能锁定控制，请重新执行连接准备后再做方向动作。';
+    }
+    $('identityNext').disabled = !all(state.identityDone);
+    $('identityReset').textContent = demoMode() ? '重置本次演示记录' : '清空本次逐台记录';
+  }
+  function renderBaud(d) {
+    const values = demoMode() ? d.baud : state.identityRecords.map(record => record.sourceBaud);
+    const nonNull = values.filter(value => value != null).map(Number);
+    const uniform = nonNull.length === 4 && nonNull.every(value => value === nonNull[0]);
+    const mixed = nonNull.length > 1 && !nonNull.every(value => value === nonNull[0]);
+    $('baudPill').textContent = state.baudDone ? '已验证' : mixed ? '混合速率' : '待确认';
+    $('baudPill').className = 'state-pill ' + (state.baudDone ? 'ready' : 'blocked');
+    $('baudRows').innerHTML = MOTOR_LABELS.map((label,index) => {
+      const value = values[index];
+      return '<tr><td>M' + (index + 1) + ' · ' + label + '</td><td><strong>' + esc(formatBaud(value)) + '</strong></td><td>' +
+        (value == null ? '先逐台读取' : uniform ? '四台回读一致' : mixed ? '与其他台不同，先停下' : '已读取') + '</td></tr>';
+    }).join('');
+    $('baudActionNote').textContent = demoMode()
+      ? '演示动作：只改变页面状态，不写入电机。'
+      : state.baudDone ? '真实波特率写入后端回读已验证；电机保持失能。'
+      : mixed ? '检测到不同源波特率：先由现场确认当前电脑端能稳定连接，再按主控 baud-set 流程处理。'
+      : '真实统一波特率会写入四台，并要求后端返回 verified=true；没有确认不会发送。';
+    const canRealBaud = !demoMode() && all(state.identityDone) && uniform && checked('baudConfirm') && !real.baudBusy && realIdle();
+    $('baudDemoButton').disabled = demoMode() ? !all(state.identityDone) : !canRealBaud;
+    $('baudDemoButton').textContent = demoMode() ? '演示：统一波特率' : '真实统一波特率（会写入）';
+    $('baudNext').disabled = !state.baudDone;
+  }
+  function renderDirection(d) {
+    const done = all(state.directions.map(Boolean));
+    $('directionPill').textContent = done ? '已确认' : '逐台测试';
+    $('directionPill').className = 'state-pill ' + (done ? 'ready' : 'blocked');
+    $('directionRows').innerHTML = MOTOR_LABELS.map((label,index) => {
+      const saved = state.directions[index];
+      const tested = state.directionTested[index] || (!demoMode() && directionReady(index));
+      const value = saved || (demoMode() ? d.directions?.[index] : null) || 'unset';
+      const text = value === 'unset' ? (tested ? '测试完成，待保存' : '未测试') : value === 'forward' ? '正向' : '反向';
+      let actions;
+      if (demoMode()) {
+        actions = '<button class="direction-demo" data-index="' + index + '" ' + (!state.baudDone ? 'disabled' : '') + '>演示：低幅确认</button>';
+      } else {
+        actions = '<div class="actions">' +
+          '<button class="direction-test" data-index="' + index + '" ' + (!state.baudDone || !checked('directionConfirm') || !realMotionReady() || real.directionBusy ? 'disabled' : '') + '>真实测试（会运动约45°）</button>' +
+          '<button class="direction-save" data-index="' + index + '" data-reverse="false" ' + (!tested || !directionReady(index) || real.directionBusy ? 'disabled' : '') + '>保存正向</button>' +
+          '<button class="direction-save" data-index="' + index + '" data-reverse="true" ' + (!tested || !directionReady(index) || real.directionBusy ? 'disabled' : '') + '>保存反向</button>' +
+          '</div>';
+      }
+      return '<tr><td>M' + (index + 1) + ' · ' + label + '</td><td><strong>' + text + '</strong></td><td>' +
+        (saved ? '方向已保存' : tested ? '45°测试完成，等待选择' : '尚无结果') + '</td><td>' + actions + '</td></tr>';
+    }).join('');
+    $('directionWarning').textContent = done
+      ? '四台方向已保存；真实校准仍会运动，继续前请确认急停可触达。'
+      : !state.baudDone ? '先完成身份回读和波特率验证，避免在未知通信条件下运动。'
+      : demoMode() ? '演示动作不会发送运动；真实模式会逐台调用 direction-test，后端仍保留安全门。'
+      : !checked('directionConfirm') ? '勾选低幅运动确认后，才会启用真实测试按钮。'
+      : !realMotionReady() ? '后台控制仍锁定或自动流程未空闲；请重新连接准备，必要时先急停。'
+      : '还有电机未完成“测试 → 选择正/反向 → 保存”。';
+    $('directionNext').disabled = !done;
+  }
+  function renderCalibration(d) {
+    const done = demoMode() ? state.calibrationDone : state.calibrationDone || realCalibrationReady();
+    state.calibrationDone = done;
+    const identityReady = all(state.identityDone);
+    const directionReadyAll = all(state.directions.map(Boolean));
+    const baudReady = state.baudDone;
+    $('calibrationPill').textContent = done ? '安全门通过' : '需要确认';
+    $('calibrationPill').className = 'state-pill ' + (done ? 'ready' : 'blocked');
+    $('calibrationSummary').innerHTML = [
+      ['身份',identityReady,identityReady ? '四台位置已逐台回读' : '仍有电机没有回读目标 ID'],
+      ['波特率',baudReady,baudReady ? '统一写入并回读验证' : '先统一并验证速率'],
+      ['方向',directionReadyAll,directionReadyAll ? '四台方向已有保存记录' : '逐台做低幅确认并保存'],
+      ['标定',done,done ? '当前会话可继续画图' : '保存模型无效或尚未建立当前张力基准']
+    ].map(([label,ok,text]) => '<div class="check ' + (ok ? 'ok' : 'bad') + '"><span class="icon">' + (ok ? '✓' : '!') + '</span><div><strong>' + label + '</strong><small>' + text + '</small></div></div>').join('');
+    $('calibrationDemoButton').disabled = !demoMode() || !directionReadyAll;
+    const savedAvailable = !demoMode() && real.auto?.saved_model_available === true;
+    const realGates = !demoMode() && identityReady && baudReady && directionReadyAll && realMotionReady();
+    $('calibrationSavedButton').disabled = !savedAvailable || !checked('savedCalibrationConfirm') || !realGates || real.calibrationBusy;
+    $('calibrationFullButton').disabled = !checked('fullCalibrationConfirm') || !realGates || real.calibrationBusy;
+    $('calibrationActionNote').textContent = demoMode()
+      ? '演示按钮不会发运动，只把教学状态切换为“已完成”。'
+      : real.error
+      ? '最近一次真实操作未完成：' + real.error + '；未自动进入完整校准，请重新确认后重试或显式点击完整校准。'
+      : savedAvailable
+      ? '保存模型按钮只尝试 activate_only；失败会保留模型并停在这里，不会自动 full。'
+      : '没有可用的已保存模型；完整四角校准必须单独勾选运动确认后点击。';
+    $('calibrationNext').disabled = !done;
+  }
+  function defaultPath() {
+    return [{x:.18,y:.22},{x:.82,y:.22},{x:.82,y:.78},{x:.18,y:.78},{x:.18,y:.22}];
+  }
+  function drawCanvas() {
+    const canvas = $('previewCanvas');
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0,0,w,h); ctx.fillStyle = '#fbfdff'; ctx.fillRect(0,0,w,h);
+    ctx.strokeStyle = '#dce7f1'; ctx.lineWidth = 1; ctx.beginPath();
+    ctx.moveTo(w/2,0); ctx.lineTo(w/2,h); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke();
+    const draw = (points,color,width,dash=[]) => {
+      if (!points.length) return;
+      ctx.save(); ctx.strokeStyle=color; ctx.lineWidth=width; ctx.setLineDash(dash);
+      ctx.lineJoin='round'; ctx.lineCap='round'; ctx.beginPath();
+      points.forEach((point,index) => index ? ctx.lineTo(point.x*w,point.y*h) : ctx.moveTo(point.x*w,point.y*h));
+      ctx.stroke(); ctx.restore();
+    };
+    draw(state.path,'#c87f25',3,[8,6]);
+    if (state.progress) {
+      draw(state.path.slice(0,Math.max(1,Math.ceil(state.path.length*state.progress))),'#1d9a5d',6);
+      const point = state.path[Math.max(0,Math.ceil(state.path.length*state.progress)-1)];
+      if (point) { ctx.fillStyle='#1d9a5d'; ctx.beginPath(); ctx.arc(point.x*w,point.y*h,7,0,Math.PI*2); ctx.fill(); }
+    }
+  }
+  function renderDraw(d) {
+    const gates = all(state.identityDone) && state.baudDone && all(state.directions.map(Boolean)) && state.calibrationDone;
+    const realReady = !demoMode() && gates && realCalibrationReady() && realMotionReady() && state.path.length >= 2;
+    $('drawPill').textContent = demoMode() && gates ? '演示可运行' : realReady ? '真实条件已满足' : '仅预览';
+    $('drawPill').className = 'state-pill ' + (demoMode() && gates ? 'demo' : realReady ? 'ready' : 'blocked');
+    $('runDemoButton').textContent = demoMode() ? '演示绘制（不驱动电机）' : '真实运行手绘（会运动）';
+    $('runDemoButton').className = demoMode() ? 'primary' : 'danger';
+    $('runDemoButton').disabled = demoMode() ? !gates || state.running : !realReady || !checked('drawConfirm') || real.drawBusy;
+    $('drawActionNote').className = demoMode() ? 'safe-note' : 'move-note';
+    $('drawActionNote').textContent = demoMode()
+      ? '演示绘制：只做页面动画，不驱动电机，不调用 /api/path。'
+      : realReady && checked('drawConfirm')
+      ? '真实运行会 POST /api/path；后台仍检查控制解锁、当前会话张力标定和空闲状态。'
+      : '真实模式仍是预览：需要路径至少 2 点、当前会话校准通过、后台空闲且勾选运动确认。';
+    $('drawChecks').innerHTML = [
+      ['身份与通信',all(state.identityDone) && state.baudDone,all(state.identityDone) && state.baudDone ? '已满足' : '先完成逐台身份和波特率验证'],
+      ['方向',all(state.directions.map(Boolean)),all(state.directions.map(Boolean)) ? '四台方向已保存' : '还有方向未确认'],
+      ['当前标定',state.calibrationDone, state.calibrationDone ? '当前张力模型已通过' : '标定失效或尚未完成'],
+      ['轨迹与确认',state.path.length >= 2 && (demoMode() || checked('drawConfirm')),state.path.length >= 2 ? (demoMode() || checked('drawConfirm') ? '路径和确认已具备' : '还需勾选运动确认') : '先载入或手绘至少 2 个点']
+    ].map(([label,ok,text]) => '<div class="check ' + (ok ? 'ok' : 'bad') + '"><span class="icon">' + (ok ? '✓' : '!') + '</span><div><strong>' + label + '</strong><small>' + text + '</small></div></div>').join('');
+    drawCanvas();
+  }
+  function render() {
+    renderMode();
+    const d = activeData();
+    renderConnect(d); renderIdentity(d); renderBaud(d); renderDirection(d); renderCalibration(d); renderDraw(d);
+    if (demoMode()) setGlobal(state.scenario === 'normal' ? '演示状态：身份、波特率、方向和标定均已完成，可以做页面内演示。' : d.message, state.scenario === 'normal' ? 'ok' : 'blocked');
+    else if (real.error) setGlobal('真实操作未完成：' + real.error, 'blocked');
+  }
+  async function requestJSON(url, options={}) {
+    const response = await fetch(url, options);
+    let data;
+    try { data = await response.json(); } catch (_) { throw new Error('服务返回不是 JSON'); }
+    if (response.ok === false || data?.ok === false) throw new Error(data?.message || data?.error || '服务拒绝了请求');
+    return data;
+  }
+  function jsonOptions(body) {
+    return {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)};
+  }
+  function command(action, extra={}) {
+    return requestJSON('/api/command', jsonOptions(Object.assign({action}, extra)));
+  }
+  function autoCommand(body) {
+    return requestJSON('/api/auto', jsonOptions(body));
+  }
+  function pathCommand(body) {
+    return requestJSON('/api/path', jsonOptions(body));
+  }
+  async function refreshAutoStatus() {
+    real.auto = await requestJSON('/api/auto');
+    state.calibrationDone = realCalibrationReady();
+    render();
+    return real.auto;
+  }
+  async function readReal({quiet=false}={}) {
+    real.error = '';
+    if (!quiet) setGlobal('正在读取真实服务的只读状态；尚未发送配置或运动请求。');
+    try {
+      const [ports,auto,status] = await Promise.all([
+        requestJSON('/api/ports'), requestJSON('/api/auto'), requestJSON('/api/status')
+      ]);
+      real.ports = ports; real.auto = auto; real.status = status;
+      state.calibrationDone = realCalibrationReady();
+      log('真实 GET 状态已读取：/api/ports、/api/auto、/api/status；未调用 POST。');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('真实只读读取失败：' + real.error);
+    }
+    render();
+    return real;
+  }
+  function setMode(mode,{refresh=true}={}) {
+    state.mode = mode; state.scenario = 'duplicateId'; state.logs = [];
+    ['prepareSafetyConfirm','onlyOneConnected','baudConfirm','directionConfirm','savedCalibrationConfirm','fullCalibrationConfirm','drawConfirm'].forEach(id => { if ($(id)) $(id).checked = false; });
+    real.error = ''; real.hostBaud = null; real.prepareOk = false; real.identityBusy = false; real.baudBusy = false;
+    real.directionBusy = false; real.calibrationBusy = false; real.drawBusy = false;
+    resetProgressForScenario(); render();
+    if (mode === 'real' && refresh) void readReal();
+    else if (mode === 'demo') log('切换到离线演示：所有动作都只改变页面状态。');
+  }
+  function completeIdentity(index) {
+    if (!demoMode()) return;
+    state.identityDone[index] = true;
+    state.identityRecords[index].sourceId = TARGET_IDS[index];
+    state.identityRecords[index].sourceBaud = TARGET_BAUD;
+    state.identityRecords[index].read = true; state.identityRecords[index].verified = true;
+    log('演示：记录 M' + (index + 1) + ' 的机械位置和目标 ID ' + TARGET_IDS[index] + '；未写入硬件。');
+    render();
+  }
+  async function prepareReal() {
+    if (demoMode()) return;
+    if (!checked('prepareSafetyConfirm')) { setGlobal('请先确认机构无人接触；没有确认不会调用 prepare。','blocked'); return; }
+    const port = realPort();
+    if (!port) { setGlobal('没有可用串口，无法执行连接准备。','blocked'); return; }
+    try {
+      setGlobal('正在连接并自动准备：会扫描并失能，暂不绘制。');
+      await command('prepare',{port,baud:realHostBaud(),confirmed:true});
+      real.prepareOk = true; real.error = '';
+      log('真实 prepare 已受理：主控已执行连接准备并失能；未发送绘制轨迹。');
+      await readReal({quiet:true});
+      setGlobal('连接准备完成；现在按“只接一台 → 读取 ID + 波特率”逐台操作。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('真实连接准备失败：' + real.error);
+      render();
+      setGlobal('连接准备失败：' + real.error + '；设备保持后台安全门约束。','blocked');
+    }
+  }
+  function extractFound(scan) {
+    return Array.isArray(scan?.found) ? scan.found.map(Number).filter(Number.isFinite) : [];
+  }
+  function extractSourceBaud(sweep, sourceId) {
+    const recommended = Number(sweep?.recommended_baud);
+    if (SUPPORTED_BAUDS.includes(recommended)) return recommended;
+    const rows = Array.isArray(sweep?.results) ? sweep.results : [];
+    const matches = rows.filter(row => Array.isArray(row?.valid) && row.valid.map(Number).includes(Number(sourceId)) && SUPPORTED_BAUDS.includes(Number(row.baud)));
+    return matches.length ? Number(matches[0].baud) : null;
+  }
+  async function readIdentity(index) {
+    if (demoMode()) return;
+    if (!checked('onlyOneConnected')) { setGlobal('先勾选“当前只接一台”；否则不会扫描或写入。','blocked'); return; }
+    const port = realPort();
+    if (!port) { setGlobal('没有可用串口，无法读取当前 ID。','blocked'); return; }
+    real.identityBusy = true; real.error = ''; render();
+    try {
+      // First try the remembered host baud. If the PC and this single motor
+      // disagree, baud-sweep is the read-only recovery path: it can discover
+      // the motor at its actual rate even when the first scan has no reply.
+      let scan = null;
+      let found = [];
+      let firstScanError = '';
+      try {
+        scan = await command('scan',{start:1,end:255,port,baud:realHostBaud()});
+        found = extractFound(scan);
+      } catch (error) {
+        firstScanError = error?.message || String(error);
+      }
+      const sweep = await command('baud-sweep',{bauds:SUPPORTED_BAUDS,port,baud:realHostBaud()});
+      let sourceId = found.length === 1 ? found[0] : null;
+      if (sourceId === null) {
+        const candidates = new Map();
+        (Array.isArray(sweep?.results) ? sweep.results : []).forEach(row => {
+          const baud = Number(row?.baud);
+          if (!SUPPORTED_BAUDS.includes(baud) || !Array.isArray(row?.valid)) return;
+          row.valid.map(Number).filter(Number.isFinite).forEach(id => {
+            if (!candidates.has(id)) candidates.set(id, []);
+            candidates.get(id).push(baud);
+          });
+        });
+        const ids = [...candidates.keys()];
+        if (ids.length !== 1) {
+          throw new Error(firstScanError || ('当前扫描发现 ' + found.length + ' 个地址，baud-sweep 发现 ' + ids.length + ' 个候选；必须只接一台后再继续'));
+        }
+        sourceId = ids[0];
+        const baudCandidates = candidates.get(sourceId) || [];
+        const sourceBaudCandidate = baudCandidates.find(value => SUPPORTED_BAUDS.includes(value));
+        if (!sourceBaudCandidate) throw new Error('baud-sweep 找到 ID 但没有可用波特率');
+        scan = await command('scan',{start:sourceId,end:sourceId,port,baud:sourceBaudCandidate});
+        found = extractFound(scan);
+        if (found.length !== 1 || found[0] !== sourceId) throw new Error('已找到候选波特率，但按该速率回读 ID 仍不唯一');
+      }
+      const sourceBaud = extractSourceBaud(sweep,sourceId);
+      if (!sourceBaud) throw new Error('未从 baud-sweep 回读当前这一台的波特率；保持连接不变后重试');
+      const record = state.identityRecords[index];
+      record.sourceId = sourceId; record.sourceBaud = sourceBaud; record.read = true; record.verified = false;
+      real.hostBaud = sourceBaud;
+      if (sourceId === TARGET_IDS[index]) { record.writeAccepted = true; record.rebooted = true; }
+      else if (!record.writeAccepted) record.rebooted = false;
+      updateIdentityDone();
+      log('真实只读：M' + (index + 1) + ' 读到源 ID ' + sourceId + '、波特率 ' + sourceBaud + '；主机速率不匹配时先用 baud-sweep 找到速率再回读。');
+      render();
+      setGlobal('M' + (index + 1) + ' 已读取源 ID/波特率；' + (sourceId === TARGET_IDS[index] ? '当前已是目标 ID，请回读确认。' : '可继续写入目标 ID。'),'ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('M' + (index + 1) + ' 读取失败：' + real.error);
+      render();
+      setGlobal('M' + (index + 1) + ' 读取失败：' + real.error,'blocked');
+    } finally {
+      real.identityBusy = false; render();
+    }
+  }
+  async function writeIdentity(index) {
+    if (demoMode()) return;
+    const record = state.identityRecords[index];
+    if (!checked('onlyOneConnected') || !record.read || !record.sourceBaud) {
+      setGlobal('写入前必须勾选只接一台，并先读到源 ID 与波特率。','blocked'); return;
+    }
+    if (Number(record.sourceId) === TARGET_IDS[index]) {
+      record.writeAccepted = true; record.rebooted = true; render();
+      setGlobal('M' + (index + 1) + ' 已经是目标 ID ' + TARGET_IDS[index] + '；现在回读确认即可。','ok');
+      return;
+    }
+    try {
+      real.identityBusy = true; render();
+      const result = await command('set-id',{
+        old:Number(record.sourceId), new:TARGET_IDS[index],
+        port:realPort(), baud:Number(record.sourceBaud), confirmed:true
+      });
+      if (result.accepted !== true && result.ok !== true) throw new Error(result.message || 'set-id 未收到接受确认');
+      record.writeAccepted = true; record.rebooted = false; record.verified = false;
+      real.prepareOk = false;
+      log('真实 set-id 已 ACK：源 ID ' + record.sourceId + ' → 目标 ID ' + TARGET_IDS[index] + '；等待断电重启。');
+      render();
+      setGlobal('M' + (index + 1) + ' 已收到 set-id ACK。请断电重启当前这一台，勾选“已断电重启此台”，再回读；向导不会自动跳过。','blocked');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('M' + (index + 1) + ' 写 ID 失败：' + real.error);
+      render(); setGlobal('写入 ID 失败：' + real.error,'blocked');
+    } finally {
+      real.identityBusy = false; render();
+    }
+  }
+  async function verifyIdentity(index) {
+    if (demoMode()) return;
+    const record = state.identityRecords[index];
+    const same = Number(record.sourceId) === TARGET_IDS[index];
+    if (!record.read || (!same && (!record.writeAccepted || !record.rebooted))) {
+      setGlobal('回读前必须完成源 ID/波特率读取、set-id ACK，并确认当前这一台已断电重启。','blocked'); return;
+    }
+    try {
+      real.identityBusy = true; render();
+      const scan = await command('scan',{start:TARGET_IDS[index],end:TARGET_IDS[index],port:realPort(),baud:Number(record.sourceBaud) || realHostBaud()});
+      const found = extractFound(scan);
+      if (found.length !== 1 || found[0] !== TARGET_IDS[index]) {
+        throw new Error('回读未得到唯一目标 ID ' + TARGET_IDS[index] + '；请保持单台连接并检查断电重启');
+      }
+      record.verified = true; updateIdentityDone();
+      log('真实只读回读通过：M' + (index + 1) + ' = 目标 ID ' + TARGET_IDS[index] + '。');
+      render();
+      setGlobal('M' + (index + 1) + ' 目标 ID 回读通过。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('M' + (index + 1) + ' 回读失败：' + real.error);
+      render(); setGlobal('目标 ID 回读失败：' + real.error,'blocked');
+    } finally {
+      real.identityBusy = false; render();
+    }
+  }
+  async function unifyBaud() {
+    if (demoMode()) {
+      if (!all(state.identityDone)) return;
+      state.baudDone = true; log('演示：统一波特率到 ' + $('targetBaud').value + '；未写入电机。'); render(); return;
+    }
+    if (!all(state.identityDone) || !sameReadBaud() || !checked('baudConfirm')) {
+      setGlobal('统一波特率前必须完成四台逐台回读、确认源速率可用，并勾选安全确认。','blocked'); return;
+    }
+    if (!realPort() || real.baudBusy || !realIdle()) return;
+    try {
+      real.baudBusy = true; real.error = ''; render();
+      const targetBaud = Number($('targetBaud').value);
+      const result = await command('baud-set',{target_baud:targetBaud,port:realPort(),baud:realHostBaud()});
+      if (result.verified !== true) throw new Error(result.message || 'baud-set 返回 verified=false');
+      state.baudDone = true; real.error = '';
+      real.hostBaud = targetBaud;
+      log('真实 baud-set 已验证：目标波特率 ' + targetBaud + '；后端回读通过。');
+      await readReal({quiet:true});
+      setGlobal('四台波特率统一并回读验证通过；电机保持失能。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('真实 baud-set 未完成：' + real.error);
+      render(); setGlobal('统一波特率未完成：' + real.error,'blocked');
+    } finally {
+      real.baudBusy = false; render();
+    }
+  }
+  async function waitDirectionReady(index) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await refreshAutoStatus();
+      if (directionReady(index)) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+  async function testDirection(index) {
+    if (demoMode()) {
+      if (!state.baudDone) return;
+      state.directions[index] = 'forward'; state.directionTested[index] = true;
+      log('演示：M' + (index + 1) + ' 低幅方向确认完成；未发送运动。'); render(); return;
+    }
+    if (!state.baudDone || !checked('directionConfirm') || !realMotionReady()) {
+      setGlobal('方向测试需要统一波特率、低幅运动确认、后台已解锁且当前空闲。','blocked'); return;
+    }
+    try {
+      real.directionBusy = true; real.error = ''; render();
+      await command('direction-test',{id:TARGET_IDS[index],port:realPort(),baud:realHostBaud(),confirmed:true});
+      log('真实 direction-test 已启动：M' + (index + 1) + ' 约 45°、8 RPM，等待后端完成并失能。');
+      const ready = await waitDirectionReady(index);
+      if (!ready) throw new Error('后端尚未报告 direction_ready.completed；未启用保存按钮');
+      state.directionTested[index] = true; real.error = '';
+      render(); setGlobal('M' + (index + 1) + ' 低幅方向测试完成；请选择正向或反向并保存。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('M' + (index + 1) + ' 方向测试失败：' + real.error);
+      render(); setGlobal('方向测试未完成：' + real.error,'blocked');
+    } finally {
+      real.directionBusy = false; render();
+    }
+  }
+  async function saveDirection(index, reverse) {
+    if (demoMode()) return;
+    if (!state.directionTested[index] || !directionReady(index) || !realMotionReady()) {
+      setGlobal('请先完成这一台的 45°测试，并等待后台 direction_ready；保存仍受安全门限制。','blocked'); return;
+    }
+    try {
+      real.directionBusy = true; render();
+      const result = await command('direction-save',{id:TARGET_IDS[index],reverse:Boolean(reverse),port:realPort(),baud:realHostBaud(),confirmed:true});
+      if (result.ok === false) throw new Error(result.message || 'direction-save 未通过');
+      state.directions[index] = reverse ? 'reverse' : 'forward';
+      log('真实 direction-save 已保存 M' + (index + 1) + ' = ' + (reverse ? '反向' : '正向') + '。');
+      await readReal({quiet:true});
+      setGlobal('M' + (index + 1) + ' 方向已保存；继续下一台。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('M' + (index + 1) + ' 保存方向失败：' + real.error);
+      render(); setGlobal('保存方向失败：' + real.error,'blocked');
+    } finally {
+      real.directionBusy = false; render();
+    }
+  }
+  function demoCalibration() {
+    if (!demoMode() || !all(state.directions.map(Boolean))) return;
+    state.calibrationDone = true; log('演示：校准安全门通过；未发送校准指令。'); render();
+  }
+  async function waitCalibrationResult() {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      await refreshAutoStatus();
+      if (realCalibrationReady()) return true;
+      const current = String(real.auto?.auto ?? '').toLowerCase();
+      if (attempt > 0 && current === 'error') return false;
+      await sleep(250);
+    }
+    return realCalibrationReady();
+  }
+  async function activateSavedCalibration() {
+    if (demoMode()) return;
+    if (!checked('savedCalibrationConfirm') || !real.auto?.saved_model_available || !realMotionReady()) {
+      setGlobal('保存模型恢复需要保存模型可用、现场确认、连接已解锁且后台空闲。','blocked'); return;
+    }
+    try {
+      real.calibrationBusy = true; real.error = ''; render();
+      const result = await autoCommand(Object.assign({action:'calibrate',force_full:false,activate_only:true},CALIBRATION_BODY));
+      log('真实保存模型核验已受理：activate_only=true；失败不会自动 full。');
+      const ready = await waitCalibrationResult();
+      if (!ready) throw new Error(real.auto?.message || '保存模型核验未通过');
+      state.calibrationDone = true; real.error = '';
+      render(); setGlobal('保存模型核验通过；当前张力会话已建立。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      state.calibrationDone = false;
+      log('保存模型核验未完成：' + real.error + '；未自动进入完整校准。');
+      render(); setGlobal('保存模型核验未通过：' + real.error + '。请检查急停恢复后重试，或明确勾选完整校准。','blocked');
+    } finally {
+      real.calibrationBusy = false; render();
+    }
+  }
+  async function startFullCalibration() {
+    if (demoMode()) return;
+    if (!checked('fullCalibrationConfirm') || !realMotionReady()) {
+      setGlobal('完整四角校准需要单独运动确认、连接已解锁且后台空闲。','blocked'); return;
+    }
+    try {
+      real.calibrationBusy = true; real.error = ''; render();
+      await autoCommand(Object.assign({action:'calibrate',force_full:true,activate_only:false},CALIBRATION_BODY));
+      log('真实完整四角校准已显式启动；不会由保存模型失败自动触发。');
+      const ready = await waitCalibrationResult();
+      if (!ready) throw new Error(real.auto?.message || '完整四角校准未完成');
+      state.calibrationDone = true; real.error = '';
+      render(); setGlobal('完整四角校准完成，当前会话安全门通过。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      state.calibrationDone = false;
+      log('完整四角校准未完成：' + real.error);
+      render(); setGlobal('完整四角校准未完成：' + real.error + '；可在确认安全后重试。','blocked');
+    } finally {
+      real.calibrationBusy = false; render();
+    }
+  }
+  function runDemo() {
+    if (!demoMode()) return;
+    const gates = all(state.identityDone) && state.baudDone && all(state.directions.map(Boolean)) && state.calibrationDone;
+    if (!gates) { setGlobal('还不能演示画图：先完成前五个演示安全门。','blocked'); return; }
+    state.running = true; state.progress = 0; log('演示：开始页面动画，不驱动电机。'); render();
+    let tick = 0; clearInterval(runDemo.timer);
+    runDemo.timer = setInterval(() => {
+      tick += 1; state.progress = Math.min(1,tick/24); drawCanvas();
+      if (state.progress >= 1) {
+        clearInterval(runDemo.timer); state.running = false;
+        log('演示：页面动画完成；没有真实运动结果。'); render();
+      }
+    },55);
+  }
+  async function runDraw() {
+    if (demoMode()) return runDemo();
+    if (!checked('drawConfirm') || state.path.length < 2 || !state.calibrationDone || !all(state.identityDone) ||
+        !state.baudDone || !all(state.directions.map(Boolean)) || !realMotionReady()) {
+      setGlobal('真实绘制仍被安全门阻止：需要校准、路径至少 2 点、确认勾选、后台解锁并空闲。','blocked'); return;
+    }
+    try {
+      real.drawBusy = true; state.running = true; real.error = ''; render();
+      const body = {
+        action:'path', points:state.path, segments:[state.path], speed:50,
+        repeat:false, confirmed:true, open_loop:false, feedback:true,
+        feedback_during_motion:true, controller_mode:'four_position'
+      };
+      const result = await pathCommand(body);
+      log('真实 /api/path 已受理：' + (result.message || '轨迹已交给主控安全门。'));
+      await readReal({quiet:true});
+      state.running = !realIdle();
+      render(); setGlobal(result.message || '真实轨迹请求已受理；请观察主控状态，急停仍可用。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error); state.running = false;
+      log('真实绘制未完成：' + real.error);
+      render(); setGlobal('真实绘制未完成：' + real.error,'blocked');
+    } finally {
+      real.drawBusy = false; render();
+    }
+  }
+  async function stopReal() {
+    if (demoMode()) { state.running = false; clearInterval(runDemo.timer); render(); return; }
+    try {
+      await command('stop');
+      state.running = false; log('已发送急停请求；等待主控确认四台失能。');
+      await readReal({quiet:true});
+      setGlobal('急停请求已发送；请观察主控回报，未自动恢复运动。','ok');
+    } catch (error) {
+      real.error = error?.message || String(error);
+      log('急停请求失败：' + real.error);
+      render(); setGlobal('急停请求未确认：' + real.error,'blocked');
+    }
+  }
+  function loadPreview() {
+    state.path = defaultPath(); state.progress = 0; drawCanvas();
+    log('加载验收矩形：仅预览，不发送请求。'); render();
+  }
+  $('demoMode').addEventListener('click',() => setMode('demo'));
+  $('realMode').addEventListener('click',() => setMode('real'));
+  $('refreshButton').addEventListener('click',() => demoMode() ? (log('演示状态已刷新；没有真实请求。'),render()) : readReal());
+  $('scenarioSelect').addEventListener('change',event => { state.scenario=event.target.value; resetProgressForScenario(); log('切换演示状态：'+scenario().label); render(); });
+  ['prepareSafetyConfirm','onlyOneConnected','baudConfirm','directionConfirm','savedCalibrationConfirm','fullCalibrationConfirm','drawConfirm','targetBaud'].forEach(id => $(id)?.addEventListener('change',render));
+  document.querySelectorAll('[data-jump]').forEach(button => button.addEventListener('click',() => $('step-'+button.dataset.jump)?.scrollIntoView({behavior:'smooth',block:'start'})));
+  $('realStopButton').addEventListener('click',stopReal);
+  $('prepareRealButton').addEventListener('click',prepareReal);
+  $('connectNext').addEventListener('click',() => $('step-identity').scrollIntoView({behavior:'smooth'}));
+  $('connectExplain').addEventListener('click',() => setGlobal('同 ID 的电机会同时响应同一个地址；四台一起写入可能同时改变，无法知道哪一台被改。必须逐台接入。','blocked'));
+  $('identityRows').addEventListener('click',event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    const index = Number(button.dataset.index);
+    if (button.classList.contains('identity-demo')) completeIdentity(index);
+    if (button.classList.contains('identity-read')) void readIdentity(index);
+    if (button.classList.contains('identity-write')) void writeIdentity(index);
+    if (button.classList.contains('identity-verify')) void verifyIdentity(index);
+  });
+  $('identityRows').addEventListener('change',event => {
+    const checkbox = event.target.closest('.reboot-confirm');
+    if (!checkbox) return;
+    state.identityRecords[Number(checkbox.dataset.index)].rebooted = checkbox.checked;
+    render();
+  });
+  $('identityReset').addEventListener('click',() => {
+    state.identityRecords = makeIdentityRecords(); state.identityDone=[false,false,false,false];
+    if (demoMode()) state.baudDone=false;
+    log('已清空本次逐台记录；没有修改硬件。'); render();
+  });
+  $('identityNext').addEventListener('click',() => $('step-baud').scrollIntoView({behavior:'smooth'}));
+  $('baudDemoButton').addEventListener('click',unifyBaud);
+  $('baudNext').addEventListener('click',() => $('step-direction').scrollIntoView({behavior:'smooth'}));
+  $('directionRows').addEventListener('click',event => {
+    const button=event.target.closest('button');
+    if (!button) return;
+    const index=Number(button.dataset.index);
+    if (button.classList.contains('direction-demo') || button.classList.contains('direction-test')) void testDirection(index);
+    if (button.classList.contains('direction-save')) void saveDirection(index,button.dataset.reverse === 'true');
+  });
+  $('directionNext').addEventListener('click',() => $('step-calibration').scrollIntoView({behavior:'smooth'}));
+  $('calibrationDemoButton').addEventListener('click',demoCalibration);
+  $('calibrationSavedButton').addEventListener('click',activateSavedCalibration);
+  $('calibrationFullButton').addEventListener('click',startFullCalibration);
+  $('calibrationPreviewButton').addEventListener('click',() => setGlobal('完整校准会运动：先确认无人接触、急停可用，再单独勾选完整校准。当前没有发送指令。','blocked'));
+  $('calibrationNext').addEventListener('click',() => $('step-draw').scrollIntoView({behavior:'smooth'}));
+  $('loadPreviewButton').addEventListener('click',loadPreview);
+  $('runDemoButton').addEventListener('click',runDraw);
+  $('previewCanvas').addEventListener('pointerdown',event => {
+    const rect=event.currentTarget.getBoundingClientRect();
+    state.path=[{x:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height))}];
+    state.progress=0; drawCanvas(); event.currentTarget.setPointerCapture(event.pointerId);
+  });
+  $('previewCanvas').addEventListener('pointermove',event => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const rect=event.currentTarget.getBoundingClientRect();
+    state.path.push({x:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height))});
+    drawCanvas();
+  });
+  $('previewCanvas').addEventListener('pointerup',event => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    log((demoMode() ? '演示' : '真实') + '：记录一条页面手绘轨迹；尚未发送请求。'); render();
+  });
+  window.y42Onboarding = {
+    state, SCENARIOS, setMode, readReal, render, loadPreview, runDemo,
+    completeIdentity, unifyBaud, testDirection, demoCalibration,
+    prepareReal, readIdentity, writeIdentity, verifyIdentity,
+    activateSavedCalibration, startFullCalibration, saveDirection,
+    runDraw, stopReal
+  };
+  resetProgressForScenario(); render(); loadPreview();
+})();
+</script>
+</body>
+</html>

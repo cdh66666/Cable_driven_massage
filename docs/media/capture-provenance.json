@@ -1,0 +1,66 @@
+[
+  {
+    "file": "test-patterns-a.gif",
+    "bytes": 1785609,
+    "source": "qa\\tutorial_landscape\\real_lesson_20260908\\六图案_实机原速.mp4",
+    "start_seconds": 5,
+    "duration_seconds": 8,
+    "speed": 1,
+    "rotation_degrees": 180,
+    "fps": 8,
+    "motor_view": {
+      "top_left": 1,
+      "top_right": 2,
+      "bottom_right": 3,
+      "bottom_left": 4
+    }
+  },
+  {
+    "file": "test-patterns-b.gif",
+    "bytes": 1782149,
+    "source": "qa\\tutorial_landscape\\real_lesson_20260908\\六图案_实机原速.mp4",
+    "start_seconds": 18,
+    "duration_seconds": 8,
+    "speed": 1,
+    "rotation_degrees": 180,
+    "fps": 8,
+    "motor_view": {
+      "top_left": 1,
+      "top_right": 2,
+      "bottom_right": 3,
+      "bottom_left": 4
+    }
+  },
+  {
+    "file": "test-patterns-c.gif",
+    "bytes": 1887263,
+    "source": "qa\\tutorial_landscape\\real_lesson_20260908\\六图案_实机原速.mp4",
+    "start_seconds": 41,
+    "duration_seconds": 8,
+    "speed": 1,
+    "rotation_degrees": 180,
+    "fps": 8,
+    "motor_view": {
+      "top_left": 1,
+      "top_right": 2,
+      "bottom_right": 3,
+      "bottom_left": 4
+    }
+  },
+  {
+    "file": "xingmao-motion.gif",
+    "bytes": 1631409,
+    "source": "qa\\tutorial_landscape\\real_lesson_20260908\\星猫_实机原速.mp4",
+    "start_seconds": 8,
+    "duration_seconds": 8,
+    "speed": 1,
+    "rotation_degrees": 180,
+    "fps": 8,
+    "motor_view": {
+      "top_left": 1,
+      "top_right": 2,
+      "bottom_right": 3,
+      "bottom_left": 4
+    }
+  }
+]

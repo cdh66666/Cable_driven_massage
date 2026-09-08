@@ -1,0 +1,27 @@
+const {chromium}=require('C:/Users/1/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const fs=require('fs');
+(async()=>{
+ const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});
+ const page=await browser.newPage({viewport:{width:1450,height:1100},deviceScaleFactor:1});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:8788');
+ await page.waitForFunction(()=>document.querySelector('#count').textContent!=='—',{},{timeout:30000});
+ await page.locator('#play').click();
+ await page.waitForFunction(()=>document.querySelector('#connection').textContent.includes('后台已连接'));
+ await page.evaluate(()=>{frame=simulation.frames.length-1;playing=false;drawTop();drawScene()});
+ await page.screenshot({path:'qa/twin/interface-desktop.png',fullPage:true});
+ await page.locator('#shape').selectOption('snake');await page.locator('#height').fill('5');await page.locator('#preview').click();
+ await page.waitForFunction(()=>!document.querySelector('#preview').disabled,{},{timeout:30000});
+ const text=await page.locator('#message').innerText();if(!text.includes('仿真已保存'))throw Error(text);
+ await page.screenshot({path:'qa/twin/snake-height-preview.png',fullPage:true});
+ await page.locator('#runs').selectOption('20260905_230801_088_position_microprobe_worker_317e0355');await page.locator('#replay').click();
+ await page.waitForFunction(()=>document.querySelector('#runStatus').textContent.includes('SHA256'));
+ await page.locator('#scrub').fill('950');
+ await page.screenshot({path:'qa/twin/hardware-replay.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);
+ const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+2);
+ await page.screenshot({path:'qa/twin/interface-mobile.png',fullPage:true});
+ if(overflow)errors.push('mobile horizontal overflow');
+ fs.writeFileSync('qa/twin/ui-verification.json',JSON.stringify({errors,hardwareActionsSent:0,checked:['circle simulation','snake +5mm simulation','real archive replay','slider','desktop/mobile layout']},null,2));
+ await browser.close();if(errors.length)throw Error(errors.join('\n'));console.log('UI checks passed; no hardware action requests');
+})().catch(e=>{console.error(e);process.exit(1)});

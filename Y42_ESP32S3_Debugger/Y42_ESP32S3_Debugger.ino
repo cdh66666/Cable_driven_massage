@@ -47,6 +47,7 @@ String autoMessage = "等待自动校准";
 uint8_t calibrationCorner = 0;
 uint16_t calibrationStrongCurrent = 1300, calibrationTensionCurrent = 225;
 static constexpr uint16_t MOTOR_HARD_CURRENT_LIMIT = 3000;
+static constexpr uint16_t MOTOR_OPERATING_CURRENT_LIMIT = 2000;
 static constexpr float TRAJECTORY_MAX_MOTOR_RPM = 3000.0f;
 static constexpr float TRAJECTORY_RPM_FEEDFORWARD = 1.25f;
 float effectiveSideMm = 130.0f; // User definition: 150mm - ball radius 20mm
@@ -102,7 +103,7 @@ pre{height:125px;overflow:auto;white-space:pre-wrap;background:#090e1c;border:1p
 
 <section class="card"><h2>安全控制</h2><div class="buttons"><button class="good" onclick="action('enableAll','on=1')">四电机使能 / 锁轴</button><button class="secondary" onclick="action('enableAll','on=0')">四电机失能 / 松轴</button><button class="warn" onclick="action('release')">解除保护</button><button class="stop" style="font-size:14px;padding:8px" onclick="action('stop')">■ 四电机立即停止</button></div></section>
 
-<section class="card full"><h2>四电机绳长自动校准与轨迹测试</h2><div class="row stack"><div class="field"><label>框架边长 mm</label><input id="calSide" type="number" min="50" max="1000" value="150"></div><div class="field"><label>小球直径 mm</label><input id="calBall" type="number" min="1" max="500" value="40"></div><div class="field"><label>目标电机电流 mA</label><input id="calStrong" type="number" min="50" max="3000" value="1300"></div><div class="field"><label>其余张紧电流 mA</label><input id="calWeak" type="number" min="20" max="500" value="225"></div></div><label style="display:flex;align-items:center;gap:7px;color:#ffb547;font-size:12px;margin:7px 0"><input id="calReady" type="checkbox" style="width:auto">机构范围已清空，人员已离开，并已准备物理急停</label><div class="buttons"><button id="calButton" class="warn" onclick="startCalibration()">开始四角校准</button><button class="stop" style="font-size:14px;padding:8px" onclick="autoCommand('abort')">四电机急停</button></div><div class="buttons" style="margin-top:6px"><button class="good" onclick="autoCommand('circle')">校准后画圆</button><button onclick="autoCommand('triangle')">校准后画三角形</button></div><div id="autoStatus" class="tip" style="margin-top:8px;padding:8px;background:#0d1427;border-radius:8px">正在读取校准状态…</div><div id="coeffs" class="tip"></div><div class="tip danger">目标电流可调至3000mA，其余225mA持续张紧；实测超过3000mA、过温、保护或通讯中断会立即停止。</div></section>
+<section class="card full"><h2>四电机绳长自动校准与轨迹测试</h2><div class="row stack"><div class="field"><label>框架边长 mm</label><input id="calSide" type="number" min="50" max="1000" value="150"></div><div class="field"><label>小球直径 mm</label><input id="calBall" type="number" min="1" max="500" value="40"></div><div class="field"><label>目标电机电流 mA</label><input id="calStrong" type="number" min="50" max="2000" value="1300"></div><div class="field"><label>其余张紧电流 mA</label><input id="calWeak" type="number" min="20" max="500" value="225"></div></div><label style="display:flex;align-items:center;gap:7px;color:#ffb547;font-size:12px;margin:7px 0"><input id="calReady" type="checkbox" style="width:auto">机构范围已清空，人员已离开，并已准备物理急停</label><div class="buttons"><button id="calButton" class="warn" onclick="startCalibration()">开始四角校准</button><button class="stop" style="font-size:14px;padding:8px" onclick="autoCommand('abort')">四电机急停</button></div><div class="buttons" style="margin-top:6px"><button class="good" onclick="autoCommand('circle')">校准后画圆</button><button onclick="autoCommand('triangle')">校准后画三角形</button></div><div id="autoStatus" class="tip" style="margin-top:8px;padding:8px;background:#0d1427;border-radius:8px">正在读取校准状态…</div><div id="coeffs" class="tip"></div><div class="tip danger">目标电流可调至2000mA，其余225mA持续张紧；实测超过3000mA、过温、保护或通讯中断会立即停止。</div></section>
 
 <section class="card full"><h2>手绘小球行驶轨迹（全有效范围）</h2><canvas id="pathCanvas" width="600" height="600"></canvas><div class="row"><div class="field"><label>轨迹速度 mm/s（固件按校准系数自动限制）</label><input id="pathSpeed" type="number" min="30" max="5000" value="300"></div></div><div class="buttons"><button class="secondary" onclick="clearDrawnPath()">清空重画</button><button id="runPathButton" class="good" onclick="runDrawnPath()">按原始轨迹运行</button><button class="warn" onclick="repeatDrawnPath()">循环上次轨迹（直到停止）</button><button class="secondary" onclick="stopPathLoop()">停止循环（本轮结束后）</button></div><div id="pathUploadState" class="tip">等待绘制</div><div class="tip">可输入最高 5000 mm/s；固件会根据 3000 RPM 电机上限、当前校准系数和 100 Hz 控制周期自动采用可实现的最高值。</div></section>
 
@@ -735,7 +736,7 @@ void handleAutoPost() {
     repeatCustomContinuously=false;
     float side=server.arg("side").toFloat(), ball=server.arg("ball").toFloat();
     long strong=argLong("strong",1300), weak=argLong("weak",225);
-    if(side<50||side>1000||ball<1||ball>=side||strong<50||strong>MOTOR_HARD_CURRENT_LIMIT||weak<20||weak>=strong) { sendJson("{\"ok\":false,\"error\":\"校准参数范围无效\"}",400); return; }
+    if(side<50||side>1000||ball<1||ball>=side||strong<50||strong>MOTOR_OPERATING_CURRENT_LIMIT||weak<20||weak>=strong) { sendJson("{\"ok\":false,\"error\":\"校准参数范围无效\"}",400); return; }
     effectiveSideMm=side-ball/2.0f; calibrationStrongCurrent=strong; calibrationTensionCurrent=weak;
     // Keep the last known-good calibration in NVS until a complete new fit passes.
     calibrationValid=false; autoTensionHold=false;
@@ -853,7 +854,7 @@ void handleAction() {
     long dir = argLong("dir", 0), current = argLong("current", 100), slope = argLong("slope", 200);
     double maxRpm = argDouble("maxrpm", 10);
     if (firmwareType != FW_X) { sendJson("{\"ok\":false,\"error\":\"电流/力矩模式仅支持 X 固件\"}", 400); return; }
-    if (dir < 0 || dir > 1 || current < 0 || current > 5000 || slope < 0 || slope > 65535 || maxRpm < 0.1 || maxRpm > 3000) {
+    if (dir < 0 || dir > 1 || current < 0 || current > MOTOR_OPERATING_CURRENT_LIMIT || slope < 0 || slope > 65535 || maxRpm < 0.1 || maxRpm > 3000) {
       sendJson("{\"ok\":false,\"error\":\"电流模式参数超出范围\"}", 400); return;
     }
     cmd = {motorAddress, 0xC5, (uint8_t)dir};

@@ -10,6 +10,31 @@ dist/
 *.spec
 __pycache__/
 *.pyc
+.venv*/
+*.log
+.env
+.env.*
+!.env.example
+
+# Per-device calibration and run artifacts must not travel with source.
+tools/y42_pc_calibration.json
+tools/y42_pc_calibration.*.backup.json
+tools/y42_pc_serial.json
+tools/manual_test_archive/
+tools/manual_test_runs/
+qa/
+restart/
+
+# Full recordings stay local; README uses curated small GIFs in docs/media.
+*.mp4
+*.webm
+*.mov
+*.avi
+*.mkv
+*.wav
+qa/camera_runs/
+qa/tutorial_landscape/
+docs/media/*-preview.jpg
 
 # Local debug captures and throwaway test tools
 tools/__pycache__/
