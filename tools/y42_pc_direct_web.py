@@ -21289,9 +21289,12 @@ def execute(data: dict) -> dict:
     baud = int(data.get("baud", current_baud()))
     if baud < 1200 or baud > 1000000:
         raise ValueError("波特率范围无效")
-    with STATE_LOCK:
-        STATE["port"] = port
-        STATE["baud"] = baud
+    # Read-only probes use a temporary port/rate. Never redirect normal
+    # telemetry and reconnect traffic to the last unsuccessful scan rate.
+    if action not in {"scan", "baud-sweep"}:
+        with STATE_LOCK:
+            STATE["port"] = port
+            STATE["baud"] = baud
     if action == "prepare":
         require_confirmed(data)
         return prepare_system(port, baud)
@@ -22388,7 +22391,7 @@ async function post(body,url='/api/command',timeoutMs=15000,quiet=false){
   const c=new AbortController(),timer=setTimeout(()=>c.abort(),timeoutMs),label=operationLabel(body);
   let rejected=false;
   try{
-    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...body,port:port(),baud:baud(),armed:body.armed===undefined?!controlsLocked:body.armed}),signal:c.signal}),raw=await r.text();
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...body,port:body.port??port(),baud:body.baud??baud(),armed:body.armed===undefined?!controlsLocked:body.armed}),signal:c.signal}),raw=await r.text();
     let j;
     try{j=raw?JSON.parse(raw):null}catch(e){throw Error('服务返回了无法识别的数据（HTTP '+r.status+'）')}
     if(!r.ok||!j||j.ok===false){rejected=!!j&&(j.ok===false||!r.ok);throw Error(j?.error||j?.message||('服务拒绝请求（HTTP '+r.status+'）'))}
@@ -22609,7 +22612,7 @@ async function stopAll(){try{log(await post({action:'stop'}))}catch(e){log('急�
 window.addEventListener('keydown',e=>{if(e.code!=='Space')return;e.preventDefault();if(e.repeat||spaceHeld)return;spaceHeld=true;$('trajectoryState').textContent='空格键急停：正在停止并失能四台电机……';void stopAll()});window.addEventListener('keyup',e=>{if(e.code==='Space'){e.preventDefault();spaceHeld=false}});window.addEventListener('blur',()=>{spaceHeld=false});
 function idConfigSafe(){return sessionSafetyConfirmed}
 async function scanIds(){if(scanBusy)return;const start=+$('scanStart').value,end=+$('scanEnd').value;if(!Number.isInteger(start)||!Number.isInteger(end)||start<0||end>255||start>end){alert('扫描范围必须是 0..255，且起始不大于结束。');return}scanBusy=true;$('scanButton').disabled=true;$('idState').textContent='正在扫描 ID '+start+'..'+end+'，实时状态刷新已暂停，请等待……';try{const j=await post({action:'scan',start,end});$('idState').textContent=j.message+'；发现：'+(j.found&&j.found.length?j.found.join(', '):'无');log(j)}catch(e){$('idState').textContent='扫描失败：'+e.message;log('扫描 ID 失败：'+e.message)}finally{scanBusy=false;$('scanButton').disabled=false;refreshStatus(true)}}
-async function setId(){if(!idConfigSafe()){alert('请先点击“连接并自动准备”；缺失电机时请先检查其动力电源和 RS485 通讯。');return}const old=+$('oldId').value,newId=+$('newId').value;if(!Number.isInteger(old)||!Number.isInteger(newId)||old<1||newId<1||old>255||newId>255||old===newId){alert('旧 ID、新 ID 必须是不同的 1..255 整数。');return}try{const j=await post({action:'set-id',old,new:newId,confirmed:true});$('idState').textContent=j.message;controlsLocked=true;sessionSafetyConfirmed=false;updateControlLock();setConnectionState('ID 已修改；请断电重启电机后重新点击“连接并自动准备”。',true);log(j)}catch(e){$('idState').textContent='设置 ID 失败：'+e.message;log('设置 ID 失败：'+e.message)}}
+async function setId(){const old=+$('oldId').value,newId=+$('newId').value;if(!Number.isInteger(old)||!Number.isInteger(newId)||old<1||newId<1||old>255||newId>255||old===newId){alert('旧 ID、新 ID 必须是不同的 1..255 整数。');return}try{const j=await post({action:'set-id',old,new:newId,confirmed:true});$('idState').textContent=j.message;controlsLocked=true;sessionSafetyConfirmed=false;updateControlLock();setConnectionState('ID 已修改；请断电重启电机后重新点击“连接并自动准备”。',true);log(j)}catch(e){$('idState').textContent='设置 ID 失败：'+e.message;log('设置 ID 失败：'+e.message)}}
 async function motorSimple(action){if(action!=='disable'&&action!=='clear'&&action!=='release'&&action!=='abort-home'&&action!=='set-home'&&!safe())return;if(['clear','release','abort-home','set-home'].includes(action)&&!confirm('确认对选中的电机发送 '+action+'？'))return;try{log(await post({action,id:+$('motorId').value,confirmed:true}))}catch(e){log(action+' 失败：'+e.message)}finally{refreshStatus(true)}}
 async function motorCommand(action){if(!safe())return;const b={action,id:+$('motorId').value,confirmed:true};if(action==='home')b.mode=+$('homeMode').value;if(action==='speed'){b.direction=+$('speedDirection').value;b.rpm=+$('speedRpm').value;b.acceleration=+$('speedAcc').value}if(action==='torque'){b.direction=+$('torqueDirection').value;b.current=+$('torqueCurrent').value;b.slope=+$('torqueSlope').value;b.max_rpm=+$('torqueMaxRpm').value}if(action==='position'){b.direction=+$('positionDirection').value;b.degrees=+$('positionDegrees').value;b.rpm=+$('positionRpm').value;b.acceleration=+$('positionAcc').value;b.mode=+$('positionMode').value}try{log(await post(b))}catch(e){log(action+' 失败：'+e.message)}finally{refreshStatus(true)}}
 async function rawCommand(){if(!safe())return;try{log(await post({action:'raw',hex_frame:$('rawFrame').value,confirmed:true}))}catch(e){log('原始帧失败：'+e.message)}}
@@ -22776,7 +22779,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             if path == "/":
-                body = PAGE.encode("utf-8")
+                # Read presentation on every request: future page changes need
+                # no serial-controller restart.
+                base = Path(__file__).read_text(encoding="utf-8").split("PAGE = r'''", 1)[1].split("'''", 1)[0]
+                script = Path(__file__).with_name("y42_four_pages.js").read_text(encoding="utf-8")
+                body = (base + "<script>" + script + "</script>").encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
