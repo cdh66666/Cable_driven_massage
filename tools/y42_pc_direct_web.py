@@ -3451,15 +3451,44 @@ def load_calibration() -> None:
         return
 
 
+def read_serial_settings() -> dict:
+    """Read the small serial settings file (baud and/or the chosen port)."""
+
+    try:
+        data = json.loads(SERIAL_SETTINGS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def write_serial_settings(**updates: object) -> None:
+    """Atomically merge settings so baud and port never overwrite each other."""
+
+    data = read_serial_settings()
+    for key, value in updates.items():
+        if value in (None, ""):
+            data.pop(key, None)
+        else:
+            data[key] = value
+    temp_file = SERIAL_SETTINGS_FILE.with_suffix(".json.tmp")
+    try:
+        temp_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temp_file.replace(SERIAL_SETTINGS_FILE)
+    except OSError:
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def load_saved_baud() -> int:
     """Return the last verified motor baud, falling back to the manual default."""
 
     try:
-        data = json.loads(SERIAL_SETTINGS_FILE.read_text(encoding="utf-8"))
-        baud = int(data.get("baud", direct.DEFAULT_BAUD))
-        return baud if baud in BAUD_TO_CODE else direct.DEFAULT_BAUD
-    except (OSError, ValueError, TypeError, AttributeError):
+        baud = int(read_serial_settings().get("baud", direct.DEFAULT_BAUD))
+    except (TypeError, ValueError):
         return direct.DEFAULT_BAUD
+    return baud if baud in BAUD_TO_CODE else direct.DEFAULT_BAUD
 
 
 def persist_saved_baud(baud: int) -> None:
@@ -3467,15 +3496,21 @@ def persist_saved_baud(baud: int) -> None:
 
     if baud not in BAUD_TO_CODE:
         return
-    temp_file = SERIAL_SETTINGS_FILE.with_suffix(".json.tmp")
-    try:
-        temp_file.write_text(json.dumps({"baud": baud}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temp_file.replace(SERIAL_SETTINGS_FILE)
-    except OSError:
-        try:
-            temp_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+    write_serial_settings(baud=baud)
+
+
+def load_saved_port() -> str:
+    """Return the serial port the operator last chose for the RS485 adapter."""
+
+    return str(read_serial_settings().get("port") or "").strip()
+
+
+def persist_saved_port(port: object) -> None:
+    """Remember an operator-chosen port so multi-port PCs stay usable."""
+
+    text = str(port or "").strip()
+    if text:
+        write_serial_settings(port=text)
 
 
 # Initialise the server state from the last baud rate that was verified on
@@ -3512,10 +3547,53 @@ def json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def serial_port_label(port: object) -> dict[str, str]:
+def serial_port_label(port: object) -> dict:
     device = str(getattr(port, "device", ""))
     description = str(getattr(port, "description", "") or "")
-    return {"device": device, "label": f"{device} - {description}" if description else device}
+    hwid = str(getattr(port, "hwid", "") or "")
+    manufacturer = str(getattr(port, "manufacturer", "") or "")
+    # A built-in "通信端口 (COM1)" is not the USB-RS485 adapter.  Flag the
+    # USB/bridge chips so the selector can preselect the likely adapter
+    # instead of blindly taking the first port.
+    probe = f"{description} {hwid} {manufacturer}".upper()
+    likely_adapter = any(
+        token in probe
+        for token in ("USB", "CH34", "CH35", "FTDI", "CP210", "SILICON LABS", "PROLIFIC", "PL2303")
+    )
+    return {
+        "device": device,
+        "label": f"{device} - {description}" if description else device,
+        "description": description,
+        "hwid": hwid,
+        "likely_adapter": likely_adapter,
+    }
+
+
+def ports_snapshot() -> dict:
+    """Serial ports plus the port this PC should preselect."""
+
+    ports = [serial_port_label(port) for port in direct.list_serial_ports()]
+    devices = [item["device"] for item in ports]
+    saved = load_saved_port()
+    recommended = ""
+    if saved and saved in devices:
+        recommended = saved
+    else:
+        adapters = [item["device"] for item in ports if item["likely_adapter"]]
+        if len(adapters) == 1:
+            recommended = adapters[0]
+        elif len(ports) == 1:
+            recommended = ports[0]["device"]
+        elif len(devices) > 1:
+            # Several ports and no USB bridge: never silently take COM1.
+            recommended = devices[0]
+    return {
+        "ok": True,
+        "ports": ports,
+        "recommended": recommended,
+        "saved": saved,
+        "adapter_count": sum(1 for item in ports if item["likely_adapter"]),
+    }
 
 
 def telemetry_dict(telemetry: direct.Telemetry) -> dict:
@@ -5152,7 +5230,7 @@ def request_emergency_stop(data: dict | None = None) -> dict:
         def shutdown() -> None:
             recovery = {"ok": False, "error": "急停尚未执行"}
             try:
-                port = direct.choose_port(str(port_hint) if port_hint else None)
+                port = resolve_port(port_hint)
                 recovery = disable_all_with_reconnect(
                     port,
                     baud_hint,
@@ -20938,10 +21016,41 @@ def kind_label(kind: str) -> str:
     return {"circle": "圆形", "triangle": "三角形", "square": "正方形", "rectangle": "矩形", "cross": "十字", "line": "直线", "snake": "蛇形", "custom": "手绘", "all-test-patterns": "一键图案测试"}.get(kind, kind)
 
 
-def current_port() -> str:
+def resolve_port(requested: object = None) -> str:
+    """Pick the serial port for this request.
+
+    ``direct.choose_port`` refuses to guess when a PC exposes more than one
+    serial port, which made "connect" impossible on any machine that also has
+    a built-in COM1.  The web console always offers an explicit port selector,
+    so fall back in this order instead of failing:
+
+    explicit request -> live state -> last operator choice -> only port -> first port
+    """
+
+    text = str(requested or "").strip()
+    if text:
+        return text
     with STATE_LOCK:
-        port = STATE.get("port")
-    return str(port or direct.choose_port(None))
+        cached = STATE.get("port")
+    if cached:
+        return str(cached)
+    ports = [serial_port_label(port) for port in direct.list_serial_ports()]
+    devices = [item["device"] for item in ports]
+    saved = load_saved_port()
+    if saved and saved in devices:
+        return saved
+    # Prefer the single USB bridge; a built-in "通信端口 (COM1)" must never win
+    # just because it sorts first.
+    adapters = [item["device"] for item in ports if item["likely_adapter"]]
+    if len(adapters) == 1:
+        return adapters[0]
+    if devices:
+        return devices[0]
+    raise RuntimeError("没有发现串口，请插入 USB-RS485 转换器并检查驱动")
+
+
+def current_port() -> str:
+    return resolve_port(None)
 
 
 def current_baud() -> int:
@@ -21039,7 +21148,7 @@ def auto_prepare_on_boot() -> None:
     """
 
     try:
-        port = direct.choose_port(None)
+        port = resolve_port(None)
         baud = load_saved_baud()
         set_state(port=port, baud=baud, control_unlocked=False, message="自动准备：服务启动后正在扫描 ID 1..4")
         result = prepare_system(port, baud, preserve_saved_tension=True)
@@ -21275,13 +21384,111 @@ def schedule_prepare_if_needed(port: str, baud: int) -> None:
     threading.Thread(target=worker, name="y42-reprepare", daemon=True).start()
 
 
+def diagnose_port(port: str, bauds: object = None) -> dict:
+    """Read-only self test for one adapter.
+
+    Answers the question the port selector cannot: is the chosen adapter
+    hearing anything on the bus at all?  Only 0x3A status queries are sent;
+    nothing here enables, moves or brakes a motor.
+    """
+
+    if active_auto():
+        raise RuntimeError("自动流程运行中，请先按急停再做串口自检")
+    requested = bauds if isinstance(bauds, (list, tuple)) and bauds else list(SUPPORTED_BAUDS)
+    results = []
+    total_bytes = 0
+    found_at: dict[int, list[int]] = {}
+    for baud in dict.fromkeys(int(value) for value in requested):
+        if baud < 1200 or baud > 1000000:
+            continue
+        entry = {"baud": baud, "bytes": 0, "found": [], "rx": "", "error": ""}
+        try:
+            with SERIAL_LOCK, direct.open_serial(port, baud) as connection:
+                connection.write(
+                    b"".join(direct.frame(address, 0x3A, direct.FRAME_END) for address in MOTOR_IDS)
+                )
+                connection.flush()
+                time.sleep(0.25)
+                waiting = int(getattr(connection, "in_waiting", 0) or 0)
+                raw = connection.read(waiting) if waiting else b""
+                entry["bytes"] = len(raw)
+                entry["rx"] = direct.hex_bytes(raw[:24]) if raw else ""
+                total_bytes += len(raw)
+                if raw:
+                    entry["found"] = direct.scan(connection, min(MOTOR_IDS), max(MOTOR_IDS), verbose=False)
+                    if entry["found"]:
+                        found_at[baud] = entry["found"]
+        except Exception as exc:  # noqa: BLE001 - report, never crash the page
+            entry["error"] = str(exc)
+        results.append(entry)
+
+    if found_at:
+        where = "、".join(f"{baud} → ID {ids}" for baud, ids in found_at.items())
+        message = f"{port} 自检通过：{where}。"
+    elif total_bytes == 0:
+        message = (
+            f"{port} 在所有波特率上都没有收到任何字节。这说明电脑端没有读到总线信号，"
+            "与端口选择无关。请依次检查：① 电机驱动器的动力电源是否已打开（编码器/通讯部分是否带电）；"
+            "② RS485 的 A/B 是否真的接到了这个转换器（不是接到了 ESP32 那一路）；"
+            "③ A/B 是否接反（可对调试一次）；④ 转换器与电机是否共地；⑤ 该转换器是否为 USB-RS485 型。"
+        )
+    else:
+        message = (
+            f"{port} 收到了 {total_bytes} 字节，但没有解析出符合协议的应答。"
+            "常见原因：波特率不在支持列表、电机 ID 不在 1–10、总线上还有别的设备在回包，"
+            "或电机不在 X 固件模式。"
+        )
+    return {
+        "ok": True,
+        "action": "port-diagnose",
+        "port": port,
+        "results": results,
+        "total_bytes": total_bytes,
+        "found": found_at,
+        "message": message,
+    }
+
+
+# Actions that mean "this is the adapter we are working with", so the explicit
+# port is worth remembering.  Read-only discovery scans every port in turn and
+# must not let the last scanned port overwrite the operator's choice.
+PORT_PERSIST_ACTIONS = {
+    "prepare",
+    "baud-sweep",
+    "baud-set",
+    "baud-set-single",
+    "firmware-status",
+    "port-diagnose",
+    "stability",
+    "stability-long",
+}
+
+
 def execute(data: dict) -> dict:
     action = str(data.get("action", ""))
     if action == "ports":
-        return {"ok": True, "ports": [serial_port_label(p) for p in direct.list_serial_ports()]}
+        return ports_snapshot()
+    if action == "set-port":
+        chosen = str(data.get("port") or "").strip()
+        devices = [str(port.device) for port in direct.list_serial_ports()]
+        if chosen and chosen not in devices:
+            raise ValueError(f"串口 {chosen} 当前不可用，请点击“刷新串口”后重新选择")
+        with STATE_LOCK:
+            STATE["port"] = chosen or None
+        persist_saved_port(chosen)
+        return {
+            "ok": True,
+            "action": action,
+            "port": chosen,
+            "message": f"已选择串口 {chosen}" if chosen else "已切换为自动选择串口",
+        }
+    if action == "port-diagnose":
+        return diagnose_port(resolve_port(data.get("port")), data.get("bauds"))
     if action == "stop":
         return request_emergency_stop(data)
-    port = direct.choose_port(str(data.get("port") or "") or None)
+    port = resolve_port(data.get("port"))
+    if action in PORT_PERSIST_ACTIONS and str(data.get("port") or "").strip():
+        persist_saved_port(port)
     # Diagnostics and emergency actions are often sent by the compact UI
     # without repeating the connection fields. Reuse the verified live baud;
     # falling back to 115200 here silently made the 921600 stability test open
