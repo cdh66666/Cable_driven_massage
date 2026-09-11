@@ -4,6 +4,18 @@
 
 最近更新见 [2026-09-09 四页调试台与连接修复](docs/20260909_四页调试台与连接修复.md)，前一版实机记录见 [2026-09-08 版本说明](docs/20260908_版本更新.md)。
 
+## 免安装版下载（推荐给使用者）
+
+不想装 Python 环境的话，直接下载打包好的单文件 exe：[最新版 Release](https://github.com/cdh66666/Cable_driven_massage/releases/latest)
+
+| 文件 | 用途 | 大小 |
+| --- | --- | --- |
+| `Y42-PC-Console-v1.3.0.exe` | 电脑直连 Y42 调试台（本 README 的「电脑直连」部分），双击即用 | 约 16.7 MB |
+
+用法：下载后双击，浏览器会自动打开调试页（默认 `http://127.0.0.1:8787`），不需要解压、不需要附带任何其他文件，放到中文路径或下载文件夹也能运行。首次运行 Windows SmartScreen 若提示“未知发布者”，选“更多信息 → 仍要运行”。日志在 exe 同级的 `Y42调试台_数据/Y42调试台_日志.txt`。
+
+> 旧版 `TrajectoryStudio-vX.Y.Z.exe` 是另一套轨迹工作室程序，若只是调试四台 Y42 电机，用上面的 `Y42-PC-Console` 即可。
+
 ## 实机效果
 
 以下为真实相机录像截取的原速动图，绘制速度 **50mm/s**，范围 **88×118.4mm**。展示画面旋转180°后：**左上ID1、右上ID2、右下ID3、左下ID4**。原相机视角对应右下1、左下2、左上3、右上4；旋转仅用于展示，不改变电机配置或控制坐标。
@@ -368,6 +380,18 @@ dist\TrajectoryStudio.exe
 ```
 
 把这个 exe 上传到 GitHub Releases 的附件里，不要提交进 Git 历史。
+
+### 单文件调试台（Y42-PC-Console）
+
+电脑直连调试台也能打包成单个 exe（`packaging/launcher.py` 为入口，`--onefile --windowed`）：
+
+```powershell
+python packaging\build_exe.py
+# 或在已有构建缓存上零删除快速重建：
+python packaging\_rebuild.py
+```
+
+生成 `dist\Y42调试台.exe`，双击即启动本地服务并自动打开浏览器，整包自包含。打完后用 `python packaging\_verify_delivery.py` 跑一遍交付验证（中文目录、下载文件夹、端口被占用、重复启动等 8 个场景）。
 
 ## GitHub 更新前检查
 
